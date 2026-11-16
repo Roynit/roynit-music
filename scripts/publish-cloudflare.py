@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 import tomllib
 import uuid
 
@@ -32,8 +33,18 @@ def main():
     def sql_literal(value):
         return "'" + str(value).replace("'", "''") + "'"
 
-    def query(sql):
-        return json.loads(run("d1", "execute", "roynit-library", "--remote", "--json", "--command", sql))
+    def query(sql, write=False):
+        if not write:
+            return json.loads(run("d1", "execute", "roynit-library", "--remote", "--json", "--command", sql))
+        # A UTF-8 file preserves multiline release notes through Windows .cmd launchers.
+        with tempfile.TemporaryDirectory(prefix="roynit-publish-") as folder:
+            script = Path(folder) / "query.sql"
+            script.write_text(sql, encoding="utf-8")
+            try:
+                run("d1", "execute", "roynit-library", "--remote", "--json", "--yes", "--file", str(script))
+            except subprocess.CalledProcessError as error:
+                raise SystemExit(error.output) from error
+            return []
 
     existing = query("SELECT id,sha256,published_at FROM releases WHERE app_slug='roynit-music' AND version=" + sql_literal(version))[0]["results"]
     if existing:
@@ -54,7 +65,7 @@ def main():
     values = [release_id, "roynit-music", version, notes, "Roynit-Music-" + version + "-Setup.exe", size, digest, 0, rank, stamp, stamp]
     query("INSERT OR IGNORE INTO apps(slug,name,summary,platform,created_at) VALUES (" + ",".join(map(sql_literal, app_values)) + ");"
           + "INSERT INTO releases(id,app_slug,version,notes,filename,size,sha256,required,version_rank,created_at,published_at) SELECT "
-          + ",".join(map(sql_literal, values)) + " WHERE NOT EXISTS (SELECT 1 FROM releases WHERE app_slug='roynit-music' AND published_at IS NOT NULL AND version_rank >= " + str(rank) + ");")
+          + ",".join(map(sql_literal, values)) + " WHERE NOT EXISTS (SELECT 1 FROM releases WHERE app_slug='roynit-music' AND published_at IS NOT NULL AND version_rank >= " + str(rank) + ");", write=True)
     published = query("SELECT sha256 FROM releases WHERE id=" + sql_literal(release_id) + " AND published_at IS NOT NULL")[0]["results"]
     if not published or published[0]["sha256"] != digest:
         raise SystemExit("Release publication was not confirmed")

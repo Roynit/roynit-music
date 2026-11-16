@@ -32,6 +32,7 @@ jobs:
       - name: Test and build
         shell: pwsh
         run: |
+          ./scripts/generate-notices.ps1
           cargo +1.100.0 fmt --check
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo +1.100.0 clippy --locked --features desktop --all-targets -- -D warnings
