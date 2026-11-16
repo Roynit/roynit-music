@@ -1,0 +1,27 @@
+name: Rust checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        shell: pwsh
+        run: rustup toolchain install 1.100.0 --profile minimal --component rustfmt --component clippy
+      - name: Validate source
+        shell: pwsh
+        run: |
+          cargo +1.100.0 fmt --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo +1.100.0 clippy --locked --features desktop --all-targets -- -D warnings
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo +1.100.0 test --locked --features desktop --all-targets
+          exit $LASTEXITCODE

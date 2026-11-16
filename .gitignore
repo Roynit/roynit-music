@@ -1,0 +1,10 @@
+/target/
+/dist/
+/test-output/
+/.local-data/
+*.pfx
+*.p12
+*.key
+*.dpapi
+.env
+.env.*

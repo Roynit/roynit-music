@@ -1,0 +1,8 @@
+{
+  "id": "shuffle-upcoming",
+  "name": "Shuffle upcoming tracks",
+  "version": "1.0.0",
+  "executable": "../target/release/examples/shuffle_queue.exe",
+  "enabled": false,
+  "hooks": []
+}
