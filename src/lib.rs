@@ -13,6 +13,7 @@ pub mod media;
 #[cfg(feature = "desktop")]
 pub mod media_keys;
 pub mod migration;
+pub mod mixes;
 pub mod model;
 pub mod network;
 pub mod oauth;
@@ -31,6 +32,7 @@ pub mod translation;
 pub mod updates;
 pub mod vault;
 pub mod youtube;
+mod youtube_stream;
 
 use anyhow::{Context, Result, ensure};
 use model::{Effects, PlayEvent, Playlist, Repeat, Track};
@@ -41,6 +43,24 @@ use std::{
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+fn stream_headers(value: &Value) -> Vec<(String, String)> {
+    value["headers"]
+        .as_object()
+        .map(|headers| {
+            headers
+                .iter()
+                .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.into())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+struct AutoplayRequest {
+    smart: bool,
+    job: String,
+    queue: Vec<String>,
+}
 
 pub struct Engine {
     pub store: store::Store,
@@ -56,7 +76,13 @@ pub struct Engine {
     radio: Option<RadioSession>,
     region_end: Option<f64>,
     pending_play: Option<PendingPlayback>,
-    warmed_next: Option<String>,
+    warmed_next: Option<(String, bool)>,
+    autoplay_attempted_tail: Option<String>,
+    autoplay: Option<AutoplayRequest>,
+    smart_pool: Vec<Track>,
+    smart_picks: std::collections::HashSet<String>,
+    next_audio_job: Option<String>,
+    preview_audio_job: Option<(String, String)>,
     recovery_attempts: u8,
     checkpoint: std::time::Instant,
     cache_checkpoint: std::time::Instant,
@@ -163,6 +189,12 @@ impl Engine {
             region_end: None,
             pending_play: None,
             warmed_next: None,
+            autoplay_attempted_tail: None,
+            autoplay: None,
+            smart_pool: Vec::new(),
+            smart_picks: Default::default(),
+            next_audio_job: None,
+            preview_audio_job: None,
             search_cache: Default::default(),
             recovery_attempts: 0,
             checkpoint: std::time::Instant::now(),
@@ -182,6 +214,185 @@ impl Engine {
                 .to_path_buf(),
         )
     }
+    fn autoplay_enabled(&self) -> bool {
+        self.store.data.settings.get("autoplay") != Some(&json!(false))
+            && self.radio.is_none()
+            && self.store.data.queue.repeat == Repeat::Off
+            && !self.store.data.queue.shuffle
+    }
+
+    fn smart_shuffle(&self) -> bool {
+        self.store.data.queue.shuffle
+            && self.store.data.settings.get("shuffle_mode") == Some(&json!("smart"))
+    }
+
+    fn advance_queue(&mut self, automatic: bool) -> Option<String> {
+        let smart = self.smart_shuffle();
+        let ordered = self.store.data.queue.shuffle
+            && self.store.data.settings.get("shuffle_mode") == Some(&json!("ordered"));
+        let queue = &mut self.store.data.queue;
+        if (!smart && !ordered)
+            || queue.index.is_none()
+            || (automatic && queue.repeat == Repeat::One)
+        {
+            return queue.advance(automatic).map(str::to_owned);
+        }
+        let current = queue.index?;
+        let mut seen: std::collections::HashSet<_> = queue.back_stack.iter().copied().collect();
+        seen.insert(current);
+        let artist = |index: usize| {
+            queue
+                .tracks
+                .get(index)
+                .and_then(|id| self.store.data.tracks.get(id))
+                .map(|track| track.artist.trim().to_lowercase())
+                .unwrap_or_default()
+        };
+        let current_artist = artist(current);
+        let mut available: Vec<_> = (0..queue.tracks.len())
+            .filter(|index| !seen.contains(index))
+            .collect();
+        let since_pick = std::iter::once(&current)
+            .chain(queue.back_stack.iter().rev())
+            .take_while(|index| {
+                queue
+                    .tracks
+                    .get(**index)
+                    .is_some_and(|id| !self.smart_picks.contains(id))
+            })
+            .count();
+        if smart
+            && queue.tracks.len() < 4096
+            && (since_pick >= 3 || available.is_empty())
+            && let Some(index) = self
+                .smart_pool
+                .iter()
+                .position(|track| {
+                    !queue.tracks.contains(&track.id)
+                        && !track.artist.trim().eq_ignore_ascii_case(&current_artist)
+                })
+                .or_else(|| {
+                    self.smart_pool
+                        .iter()
+                        .position(|track| !queue.tracks.contains(&track.id))
+                })
+        {
+            let track = self.smart_pool.remove(index);
+            self.smart_picks.insert(track.id.clone());
+            queue.back_stack.push(current);
+            queue.index = Some(queue.tracks.len());
+            queue.tracks.push(track.id.clone());
+            self.store
+                .data
+                .tracks
+                .entry(track.id.clone())
+                .or_insert(track);
+            return queue.current().map(str::to_owned);
+        }
+        if available.is_empty() {
+            if queue.repeat == Repeat::All {
+                let mut visits = vec![0usize; queue.tracks.len()];
+                for index in &queue.back_stack {
+                    if let Some(count) = visits.get_mut(*index) {
+                        *count += 1;
+                    }
+                }
+                let least = visits
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != current)
+                    .map(|(_, count)| *count)
+                    .min();
+                available = visits
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, count)| *i != current && Some(**count) == least)
+                    .map(|(i, _)| i)
+                    .collect();
+                if available.is_empty() {
+                    return queue.current().map(str::to_owned);
+                }
+            } else {
+                queue.index = None;
+                return None;
+            }
+        }
+        let different: Vec<_> = available
+            .iter()
+            .copied()
+            .filter(|index| artist(*index) != current_artist)
+            .collect();
+        if !different.is_empty() {
+            available = different;
+        }
+        queue.back_stack.push(current);
+        queue.index = Some(available[rand::random_range(0..available.len())]);
+        queue.current().map(str::to_owned)
+    }
+
+    fn cancel_autoplay(&mut self) {
+        if let Some(request) = self.autoplay.take() {
+            let _ = self.jobs.cancel(&request.job);
+        }
+        self.autoplay_attempted_tail = None;
+    }
+
+    fn prefill_autoplay(&mut self) {
+        let smart = self.smart_shuffle() && self.radio.is_none();
+        if !smart && !self.autoplay_enabled() {
+            self.cancel_autoplay();
+            return;
+        }
+        let queue = &self.store.data.queue;
+        let Some(index) = queue.index else { return };
+        let Some(tail) = (if smart {
+            queue.tracks.get(index)
+        } else {
+            queue.tracks.last()
+        }) else {
+            return;
+        };
+        if self.autoplay.is_some()
+            || self.player.paused()
+            || self.pending_play.is_some()
+            || self.player.track_id.as_deref() != queue.current()
+            || (!smart && queue.tracks.len().saturating_sub(index) > 3)
+            || (smart && (self.smart_pool.len() >= 4 || queue.repeat == Repeat::One))
+            || queue.tracks.len() >= 4096
+            || self.autoplay_attempted_tail.as_deref() == Some(tail.as_str())
+        {
+            return;
+        }
+        let Some(seed) = self
+            .store
+            .data
+            .tracks
+            .get(tail)
+            .filter(|track| {
+                matches!(
+                    track.platform.as_str(),
+                    "youtube" | "ytmusic" | "catalog" | "spotify"
+                )
+            })
+            .cloned()
+        else {
+            return;
+        };
+        let attempted = tail.clone();
+        let snapshot = queue.tracks.clone();
+        self.autoplay_attempted_tail = Some(attempted);
+        if let Ok(result) =
+            self.submit_job(&json!({"operation":"autoplay.fill","params":{"track":seed}}))
+            && let Some(id) = result["job_id"].as_str()
+        {
+            self.autoplay = Some(AutoplayRequest {
+                smart,
+                job: id.into(),
+                queue: snapshot,
+            });
+        }
+    }
+
     pub fn tick(&mut self) -> Result<Option<Value>> {
         self.player.tick();
         let snapshot = self.player.snapshot();
@@ -244,12 +455,27 @@ impl Engine {
             .index
             .and_then(|i| self.store.data.queue.tracks.get(i + 1))
             .cloned();
-        if next != self.warmed_next && self.player.track_id.is_some() {
+        self.player.expire_prepared_audio();
+        let near_end =
+            self.player.duration > 0. && self.player.duration - self.player.position() <= 20.;
+        let next = next
+            .filter(|id| {
+                self.player
+                    .track_id
+                    .as_ref()
+                    .is_some_and(|current| current != id)
+            })
+            .map(|id| (id, near_end));
+        if next != self.warmed_next && self.next_audio_job.is_none() {
             self.warmed_next = next.clone();
-            if let Some(id) = next {
-                let _ = self.submit_job(&json!({"operation":"stream.prepare","params":{"id":id}}));
+            if let Some((id, _)) = &next
+                && let Ok(job) =
+                    self.submit_job(&json!({"operation":"stream.prepare","params":{"id":id}}))
+            {
+                self.next_audio_job = job["job_id"].as_str().map(str::to_owned);
             }
         }
+        self.prefill_autoplay();
         let refill=self.radio.as_ref().filter(|r|!r.fetching&&r.continuation.is_some()&&std::time::Instant::now()>=r.retry_at).filter(|_|self.store.data.queue.index.is_some_and(|i|i+5>=self.store.data.queue.tracks.len())).map(|r|json!({"operation":"recommendations.radio","params":{"seed":r.seed,"continuation":r.continuation,"generation":r.generation,"append_to_queue":true,"extend":true,"limit":50}}));
         if let Some(request) = refill {
             if let Some(r) = &mut self.radio {
@@ -308,7 +534,7 @@ impl Engine {
                     let id = current.context("No recovery track")?;
                     let duration = self.player.duration;
                     self.player.wait_for_stream(id.clone(), duration, position);
-                    self.providers.invalidate(self.store.track(&id)?);
+                    self.providers.recover_stream(self.store.track(&id)?);
                     self.request_playback(&id, false, position)?;
                     if let Some(pending) = self.pending_play.as_mut() {
                         pending.record_history = false;
@@ -320,11 +546,23 @@ impl Engine {
                 self.player.stop();
                 return Ok(Some(json!({"event":"playback_error","error":decoder})));
             }
+            if !fade
+                && self.autoplay.is_some()
+                && self.autoplay_enabled()
+                && self
+                    .store
+                    .data
+                    .queue
+                    .index
+                    .is_some_and(|i| i + 1 >= self.store.data.queue.tracks.len())
+            {
+                return Ok(None);
+            }
             let cursor = QueueCursor {
                 index: self.store.data.queue.index,
                 back_stack: self.store.data.queue.back_stack.clone(),
             };
-            let id = self.store.data.queue.advance(true).map(str::to_string);
+            let id = self.advance_queue(true);
             if let Some(id) = id {
                 self.request_playback(&id, false, 0.)?;
                 if let Some(pending) = self.pending_play.as_mut() {
@@ -348,6 +586,106 @@ impl Engine {
                 .filter(|p| p.job == job.id)
                 .and_then(|p| p.cursor_before.clone());
             let apply = (|| -> Result<()> {
+                if self
+                    .preview_audio_job
+                    .as_ref()
+                    .is_some_and(|(job_id, _)| job_id == &job.id)
+                    && let Some((_, track_id)) = self.preview_audio_job.take()
+                    && self.player.track_id.as_deref() != Some(&track_id)
+                    && self
+                        .pending_play
+                        .as_ref()
+                        .is_none_or(|pending| pending.id == track_id)
+                    && let Ok(result) = &job.result
+                    && let Some(input) = result["url"].as_str()
+                {
+                    let _ = self.player.prepare_audio(
+                        input.into(),
+                        stream_headers(result),
+                        &self.store.data.effects,
+                        true,
+                    );
+                }
+                if self.next_audio_job.as_deref() == Some(&job.id) {
+                    self.next_audio_job = None;
+                    if let Some((id, _)) = &self.warmed_next
+                        && self
+                            .player
+                            .track_id
+                            .as_ref()
+                            .is_some_and(|current| current != id)
+                        && (self
+                            .pending_play
+                            .as_ref()
+                            .is_some_and(|pending| pending.id == *id)
+                            || self
+                                .store
+                                .data
+                                .queue
+                                .index
+                                .and_then(|index| self.store.data.queue.tracks.get(index + 1))
+                                == Some(id))
+                        && self
+                            .pending_play
+                            .as_ref()
+                            .is_none_or(|pending| pending.id == *id)
+                        && let Ok(result) = &job.result
+                        && let Some(input) = result["url"].as_str()
+                    {
+                        let _ = self.player.prepare_audio(
+                            input.into(),
+                            stream_headers(result),
+                            &self.store.data.effects,
+                            false,
+                        );
+                    }
+                }
+                if self.autoplay.as_ref().is_some_and(|r| r.job == job.id) {
+                    let request = self.autoplay.take().expect("autoplay request");
+                    if request.smart
+                        && self.smart_shuffle()
+                        && self.radio.is_none()
+                        && request.queue == self.store.data.queue.tracks
+                        && let Ok(value) = &job.result
+                    {
+                        let tracks: Vec<Track> = serde_json::from_value(value["tracks"].clone())?;
+                        let mut known: std::collections::HashSet<_> = request
+                            .queue
+                            .iter()
+                            .chain(self.smart_pool.iter().map(|track| &track.id))
+                            .cloned()
+                            .collect();
+                        self.smart_pool.extend(
+                            tracks
+                                .into_iter()
+                                .filter(|track| known.insert(track.id.clone()))
+                                .take(8),
+                        );
+                    } else if !request.smart
+                        && self.autoplay_enabled()
+                        && self.store.data.queue.index.is_some()
+                        && request.queue == self.store.data.queue.tracks
+                        && let Ok(value) = &job.result
+                    {
+                        let tracks: Vec<Track> = serde_json::from_value(value["tracks"].clone())?;
+                        let mut known: std::collections::HashSet<_> =
+                            request.queue.into_iter().collect();
+                        let slots = 4096usize.saturating_sub(self.store.data.queue.tracks.len());
+                        for track in tracks
+                            .into_iter()
+                            .filter(|t| known.insert(t.id.clone()))
+                            .take(slots)
+                        {
+                            self.store.data.queue.tracks.push(track.id.clone());
+                            self.store
+                                .data
+                                .tracks
+                                .entry(track.id.clone())
+                                .or_insert(track);
+                        }
+                        self.store.save()?;
+                    }
+                }
                 let Ok(result) = &job.result else {
                     return Ok(());
                 };
@@ -592,7 +930,9 @@ impl Engine {
         } else {
             None
         };
-        let google_token = if operation == "google.import" || operation == "google.library" {
+        let google_token = if operation == "music.mixes" {
+            self.current_token("google").ok()
+        } else if operation == "google.import" || operation == "google.library" {
             Some(self.current_token("google")?)
         } else {
             None
@@ -600,6 +940,15 @@ impl Engine {
         let root = self.store.root.clone();
         let search_cache = self.search_cache.clone();
         let search_key = format!("{operation}|{params}");
+        let mix_seeds = if operation == "music.mixes" {
+            mixes::seeds(
+                &self.store.data,
+                SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+            )
+        } else {
+            Vec::new()
+        };
+        let mix_key = format!("music.mixes|{}", serde_json::to_string(&mix_seeds)?);
         let support = if operation == "support.export" {
             let state = self.snapshot();
             Some(
@@ -658,6 +1007,8 @@ impl Engine {
                 "google.import",
                 "google.library",
                 "lastfm.auto",
+                "autoplay.fill",
+                "music.mixes",
                 "music.home",
                 "music.charts",
                 "music.browse",
@@ -686,6 +1037,15 @@ impl Engine {
                 "google.import"=>{let kind=text(&params,"kind")?;ensure!(["likes","tracks"].contains(&kind),"Import expects likes or tracks");let value=oauth::youtube_library(&client,google_token.as_deref().context("Sign in required")?,kind,params["playlist_id"].as_str())?;Ok(json!({"kind":kind,"name":params["name"].as_str().unwrap_or(if kind=="likes"{"YouTube likes"}else{"YouTube playlist"}),"library":value}))},
                 "plugins.run"=>plugins::execute(&root,text(&params,"id")?,params["params"].clone()),
                 "music.search" => search_cache.run(search_key,||{let api=youtube::Music{client:&client,cookies:providers.cookies.as_ref()};if let Some(filter)=params["filter"].as_str(){api.search_filtered(text(&params,"query")?,filter)}else{api.search(text(&params,"query")?)}}),
+                "autoplay.fill" => {
+                    let seed: Track = serde_json::from_value(params["track"].clone())?;
+                    serde_json::to_value(mixes::build(
+                        &youtube::Music{client:&client,cookies:providers.cookies.as_ref()}, &seed,
+                    )?).map_err(Into::into)
+                },
+                "music.mixes" => search_cache.run(mix_key, || {
+                    mixes::account_mixes(&youtube::Music{client:&client,cookies:providers.cookies.as_ref()}, google_token.as_deref(), mix_seeds)
+                }),
                 "music.home" => youtube::Music{client:&client,cookies:providers.cookies.as_ref()}.home(),
                 "music.charts" => youtube::Music{client:&client,cookies:providers.cookies.as_ref()}.charts(),
                 "music.browse" => youtube::Music{client:&client,cookies:providers.cookies.as_ref()}.browse(text(&params,"id")?,params["params"].as_str()),
@@ -927,14 +1287,7 @@ impl Engine {
             if ["spotify", "catalog"].contains(&track.platform.as_str()) {
                 provenance = json!({"url":v["playback_source"],"title":v["matched_title"],"artist":v["matched_artist"],"duration":v["duration"],"verified_duration":v["verified_duration"]});
             }
-            let headers = v["headers"]
-                .as_object()
-                .map(|m| {
-                    m.iter()
-                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.into())))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let headers = stream_headers(&v);
             (
                 v["url"].as_str().context("Missing stream URL")?.into(),
                 headers,
@@ -977,6 +1330,44 @@ impl Engine {
         .contains(&command)
         {
             self.search_cache.clear();
+        }
+        if matches!(
+            command,
+            "player.request"
+                | "player.play"
+                | "player.stop"
+                | "player.preview"
+                | "queue.set"
+                | "queue.reorder"
+                | "radio.start"
+                | "jobs.cancel_all"
+                | "network.set"
+                | "cookies.browser"
+                | "cookies.set"
+                | "cookies.clear"
+                | "oauth.logout"
+                | "backup.import"
+                | "legacy.import"
+        ) {
+            self.cancel_autoplay();
+        }
+        if matches!(
+            command,
+            "oauth.finish" | "oauth.logout" | "cookies.set" | "cookies.clear"
+        ) {
+            self.jobs.cancel_operations(&["music.mixes"]);
+            self.search_cache.clear();
+        }
+        if matches!(
+            command,
+            "player.stop"
+                | "network.set"
+                | "cookies.set"
+                | "cookies.clear"
+                | "cookies.browser"
+                | "jobs.cancel_all"
+        ) {
+            self.preview_audio_job = None;
         }
         let mut cancelled_cursor = None;
         if [
@@ -1032,7 +1423,7 @@ impl Engine {
             "player.request" => {self.radio=None;self.region_end=None;self.request_playback(text(p,"id")?,true,0.)}
             "player.next.request"|"player.previous.request"=>{
                 let cursor=cancelled_cursor.unwrap_or_else(||QueueCursor{index:self.store.data.queue.index,back_stack:self.store.data.queue.back_stack.clone()});
-                let id=if command=="player.next.request"{self.store.data.queue.advance(false)}else{self.store.data.queue.previous()}.map(str::to_owned);
+                let id=if command=="player.next.request"{self.advance_queue(false)}else{self.store.data.queue.previous().map(str::to_owned)};
                 if let Some(id)=id {let result=self.request_playback(&id,false,0.)?;if let Some(pending)=self.pending_play.as_mut(){pending.cursor_before=Some(cursor);}Ok(result)}else{self.player.stop();Ok(self.player.snapshot())}
             }
             "queue.play"=>{
@@ -1043,7 +1434,16 @@ impl Engine {
                 let resume=self.store.data.settings.get("resume").context("No saved session")?.clone();
                 self.request_playback(text(&resume,"id")?,true,resume["position"].as_f64().unwrap_or(0.))
             }
-            "stream.prepare" => self.submit_job(&json!({"operation":"stream.prepare","params":p})),
+            "stream.prepare" => {
+                let result = self.submit_job(&json!({"operation":"stream.prepare","params":p}))?;
+                if p["preview_audio"] == true
+                    && let Some(id) = p["track"]["id"].as_str()
+                    && let Some(job) = result["job_id"].as_str()
+                {
+                    self.preview_audio_job = Some((job.into(), id.into()));
+                }
+                Ok(result)
+            },
             "player.toggle"=>{if self.player.paused(){self.player.resume()?;}else{self.player.pause();}Ok(self.player.snapshot())},
             "lastfm.authorize"=>self.integrations.authorize(&self.client,p),
             "lastfm.finish"=>self.integrations.finish(&self.client),
@@ -1179,6 +1579,7 @@ impl Engine {
             | "music.home"
             | "music.charts"
             | "music.browse"
+            | "music.mixes"
             | "recommendations.radio" => self.submit_job(&json!({"operation":command,"params":p})),
             "radio.personal"=>{
                 let ids:Vec<_>=if p["kind"]=="favorites"{self.store.data.favorites.clone()}else{self.store.data.history.iter().rev().take(20).map(|h|h.track_id.clone()).collect()};
@@ -1390,6 +1791,22 @@ impl Engine {
                 self.store.save()?;
                 Ok(json!(true))
             }
+            "mix.apply" => {
+                let tracks = mixes::validate_tracks(&p["tracks"])?;
+                let name = text(p,"name")?.trim();
+                ensure!(!name.is_empty() && name.chars().count() <= 200, "Invalid mix name");
+                let play = boolean(p,"play",false);
+                let mut ids = Vec::with_capacity(tracks.len());
+                for track in tracks {
+                    ids.push(track.id.clone());
+                    self.store.data.tracks.entry(track.id.clone()).or_insert(track);
+                }
+                if play {
+                    self.dispatch(&json!({"command":"queue.play","params":{"tracks":ids,"index":0}}))
+                } else {
+                    self.dispatch(&json!({"command":"playlist.save","params":{"tracks":ids,"name":name}}))
+                }
+            }
             "playlist.save" => {
                 let id = p["id"]
                     .as_str()
@@ -1418,6 +1835,8 @@ impl Engine {
                 Ok(json!(true))
             }
             "queue.set" => {
+                self.smart_pool.clear();
+                self.smart_picks.clear();
                 self.radio = None;
                 let tracks: Vec<String> = serde_json::from_value(p["tracks"].clone())?;
                 for id in &tracks {
@@ -1447,6 +1866,18 @@ impl Engine {
                 Ok(json!(self.store.data.queue))
             }
             "queue.mode" => {
+                if let Some(mode) = p.get("shuffle_mode") {
+                    let mode = mode.as_str().context("Invalid shuffle mode")?;
+                    ensure!(["off", "classic", "ordered", "smart"].contains(&mode), "Invalid shuffle mode");
+                    self.cancel_autoplay();
+                    self.smart_pool.clear();
+                    self.store.data.queue.shuffle = mode != "off";
+                    self.store.data.settings.insert("shuffle_mode".into(), json!(mode));
+                } else if let Some(shuffle) = p["shuffle"].as_bool() {
+                    self.cancel_autoplay();
+                    self.smart_pool.clear();
+                    self.store.data.settings.insert("shuffle_mode".into(), json!(if shuffle {"classic"} else {"off"}));
+                }
                 if let Some(repeat) = p.get("repeat") {
                     self.store.data.queue.repeat = serde_json::from_value(repeat.clone())?;
                 }
@@ -1496,11 +1927,10 @@ impl Engine {
             }
             "player.next" | "player.previous" => {
                 let id = if command == "player.next" {
-                    self.store.data.queue.advance(false)
+                    self.advance_queue(false)
                 } else {
-                    self.store.data.queue.previous()
-                }
-                .map(str::to_string);
+                    self.store.data.queue.previous().map(str::to_owned)
+                };
                 if let Some(id) = id {
                     self.play_id(&id)?;
                 } else {
@@ -1682,7 +2112,7 @@ impl Engine {
             "oauth.logout" => {
                 let provider=text(p,"provider")?;
                 ensure!(["google","spotify"].contains(&provider),"Unknown account provider");
-                self.jobs.cancel_operations(if provider=="spotify" { &["spotify.library","spotify.import","spotify.search","catalog.import","catalog.metadata"] } else { &["google.library","google.import"] });
+                self.jobs.cancel_operations(if provider=="spotify" { &["spotify.library","spotify.import","spotify.search","catalog.import","catalog.metadata"] } else { &["google.library","google.import","music.mixes"] });
                 self.oauth.logout(provider);
                 vault::save(
                     &self.store.root.join("oauth.dpapi"),
@@ -1801,6 +2231,8 @@ pub const COMMANDS: &[&str] = &[
     "favorites.set",
     "history.clear",
     "playlist.save",
+    "mix.apply",
+    "music.mixes",
     "playlist.delete",
     "queue.set",
     "queue.mode",
@@ -1888,6 +2320,127 @@ mod radio_tests {
             std::thread::sleep(Duration::from_millis(5));
         }
     }
+    #[test]
+    #[ignore = "Fetches radio and starts muted native playback"]
+    fn smart_shuffle_fetches_and_plays_a_real_recommendation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = Engine::open(dir.path().into()).unwrap();
+        let track = fake("dQw4w9WgXcQ");
+        let id = track.id.clone();
+        for request in [
+            json!({"command":"library.add","params":{"track":track}}),
+            json!({"command":"queue.mode","params":{"shuffle_mode":"smart"}}),
+            json!({"command":"player.effects","params":{"muted":true}}),
+            json!({"command":"queue.play","params":{"tracks":[id]}}),
+        ] {
+            engine.dispatch(&request).unwrap();
+        }
+        let start = std::time::Instant::now();
+        while engine.smart_pool.is_empty() {
+            engine.tick().unwrap();
+            assert!(
+                start.elapsed() < Duration::from_secs(45),
+                "No Smart Shuffle picks"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(engine.store.data.queue.tracks, vec![id.clone()]);
+        let job = engine
+            .dispatch(&json!({"command":"player.next.request"}))
+            .unwrap();
+        wait(&mut engine, job["job_id"].as_str().unwrap());
+        let playing = engine.player.track_id.as_ref().unwrap();
+        assert_ne!(playing, &id);
+        assert!(engine.smart_picks.contains(playing));
+        assert_eq!(engine.store.data.queue.tracks.len(), 2);
+        engine.dispatch(&json!({"command":"player.stop"})).unwrap();
+    }
+
+    #[test]
+    fn smart_shuffle_balances_artists_and_inserts_a_pick_after_three_tracks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = Engine::open(dir.path().into()).unwrap();
+        for (video, artist) in [
+            ("abcdefghijk", "A"),
+            ("lmnopqrstuv", "A"),
+            ("123456789ab", "B"),
+            ("cdefghijklm", "C"),
+        ] {
+            let mut track = fake(video);
+            track.artist = artist.into();
+            engine.store.data.queue.tracks.push(track.id.clone());
+            engine.store.data.tracks.insert(track.id.clone(), track);
+        }
+        engine.store.data.queue.index = Some(0);
+        engine
+            .dispatch(&json!({"command":"queue.mode","params":{"shuffle_mode":"smart"}}))
+            .unwrap();
+        let recommended = fake("bcdefghijkl");
+        engine.smart_pool.push(recommended.clone());
+        let first = engine.advance_queue(true).unwrap();
+        assert_ne!(engine.store.data.tracks[&first].artist, "A");
+        let second = engine.advance_queue(false).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(engine.advance_queue(true), Some(recommended.id.clone()));
+        assert_eq!(engine.store.data.queue.previous(), Some(second.as_str()));
+        assert!(engine.smart_picks.contains(&recommended.id));
+        engine
+            .dispatch(&json!({"command":"queue.mode","params":{"shuffle":true}}))
+            .unwrap();
+        assert!(!engine.smart_shuffle());
+    }
+
+    #[test]
+    fn autoplay_appends_unique_tracks_and_ignores_a_replaced_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = Engine::open(dir.path().into()).unwrap();
+        let first = fake("abcdefghijk");
+        let next = fake("lmnopqrstuv");
+        engine
+            .store
+            .data
+            .tracks
+            .insert(first.id.clone(), first.clone());
+        engine.store.data.queue.tracks = vec![first.id.clone()];
+        engine.store.data.queue.index = Some(0);
+        let result = json!({"tracks":[first, next.clone(), next.clone()]});
+        let job = engine
+            .jobs
+            .submit("autoplay.fill".into(), None, move || Ok(result))
+            .unwrap();
+        let job = job["job_id"].as_str().unwrap().to_owned();
+        engine.autoplay = Some(AutoplayRequest {
+            smart: false,
+            job: job.clone(),
+            queue: engine.store.data.queue.tracks.clone(),
+        });
+        wait(&mut engine, &job);
+        assert_eq!(
+            engine.store.data.queue.tracks,
+            vec![first.id.clone(), next.id.clone()]
+        );
+        assert_eq!(engine.store.data.queue.index, Some(0));
+
+        let stale = fake("123456789ab");
+        let result = json!({"tracks":[stale.clone()]});
+        let job = engine
+            .jobs
+            .submit("autoplay.fill".into(), None, move || Ok(result))
+            .unwrap();
+        let job = job["job_id"].as_str().unwrap().to_owned();
+        engine.autoplay = Some(AutoplayRequest {
+            smart: false,
+            job: job.clone(),
+            queue: engine.store.data.queue.tracks.clone(),
+        });
+        engine
+            .dispatch(&json!({"command":"queue.set","params":{"tracks":[next.id.clone()]}}))
+            .unwrap();
+        wait(&mut engine, &job);
+        assert_eq!(engine.store.data.queue.tracks, vec![next.id]);
+        assert!(!engine.store.data.tracks.contains_key(&stale.id));
+    }
+
     #[test]
     fn radio_continuation_appends_without_reordering_or_repeating() {
         let dir = tempfile::tempdir().unwrap();

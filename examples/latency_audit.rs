@@ -74,5 +74,62 @@ fn main() -> anyhow::Result<()> {
         );
         e.dispatch(&json!({"command":"player.stop"}))?;
     }
+    let hovered = e.store.track(id)?.clone();
+    let job = e.dispatch(
+        &json!({"command":"stream.prepare","params":{"track":hovered,"preview_audio":true}}),
+    )?;
+    finish(&mut e, job)?;
+    std::thread::sleep(Duration::from_millis(900));
+    let started = Instant::now();
+    let job = e.dispatch(&json!({"command":"player.request","params":{"id":id}}))?;
+    finish(&mut e, job)?;
+    while e.player.position() < 0.01 {
+        e.tick()?;
+        anyhow::ensure!(
+            started.elapsed() < Duration::from_secs(20),
+            "preview audio startup timeout"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    println!(
+        "{}",
+        json!({"operation":"preview_start","first_pcm_ms":started.elapsed().as_secs_f64()*1000.})
+    );
+    e.dispatch(&json!({"command":"player.stop"}))?;
+    let next_id = "youtube:dQw4w9WgXcQ";
+    e.dispatch(&json!({"command":"library.add","params":{"track":{"id":next_id,"title":"Never Gonna Give You Up","source":"https://www.youtube.com/watch?v=dQw4w9WgXcQ","platform":"youtube"}}}))?;
+    e.dispatch(&json!({"command":"queue.set","params":{"tracks":[id,next_id],"index":0}}))?;
+    let job = e.dispatch(&json!({"command":"player.request","params":{"id":id}}))?;
+    finish(&mut e, job)?;
+    let preparation = Instant::now();
+    while preparation.elapsed() < Duration::from_secs(9) {
+        e.tick()?;
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    for (round, command) in ["player.next.request", "player.request"]
+        .into_iter()
+        .enumerate()
+    {
+        let started = Instant::now();
+        let job = e.dispatch(&json!({"command":command,"params":{"id":next_id}}))?;
+        finish(&mut e, job)?;
+        while e.player.position() < 0.01 {
+            e.tick()?;
+            anyhow::ensure!(
+                started.elapsed() < Duration::from_secs(20),
+                "queue audio startup timeout"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        anyhow::ensure!(
+            e.player.track_id.as_deref() == Some(next_id),
+            "wrong queue track"
+        );
+        println!(
+            "{}",
+            json!({"operation":"queue_start","prepared_pcm":round==0,"first_pcm_ms":started.elapsed().as_secs_f64()*1000.})
+        );
+        e.dispatch(&json!({"command":"player.stop"}))?;
+    }
     Ok(())
 }

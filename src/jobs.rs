@@ -21,6 +21,9 @@ pub fn check_cancelled() -> Result<()> {
     );
     Ok(())
 }
+pub(crate) fn thread_cancel_token() -> Option<Arc<AtomicBool>> {
+    CANCEL.with(|token| token.borrow().clone())
+}
 pub fn set_thread_cancel_token(token: Arc<AtomicBool>) {
     CANCEL.with(|c| *c.borrow_mut() = Some(token));
 }

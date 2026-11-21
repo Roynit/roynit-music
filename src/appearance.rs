@@ -14,7 +14,7 @@ impl Default for Appearance {
     fn default() -> Self {
         Self {
             mode: "dark".into(),
-            accent: [112, 80, 197],
+            accent: [170, 152, 255],
             font_size: 15.,
             reduced_motion: false,
             visualizer: "off".into(),

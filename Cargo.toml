@@ -19,7 +19,12 @@ name = "riff-desktop"
 path = "src/desktop.rs"
 required-features = ["desktop"]
 
+[[example]]
+name = "chromium_audit"
+required-features = ["chromium-audit"]
+
 [features]
+chromium-audit = ["dep:webview2-com", "dep:windows"]
 default = []
 desktop = ["dep:eframe", "dep:egui_extras", "dep:image", "dep:rfd", "dep:open", "dep:tray-icon", "dep:souvlaki", "dep:raw-window-handle"]
 
@@ -60,3 +65,6 @@ walkdir = "2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
 
+
+webview2-com = { version = "0.39.1", optional = true }
+windows = { version = "0.62", features = ["Win32_System_Com", "Win32_UI_WindowsAndMessaging"], optional = true }

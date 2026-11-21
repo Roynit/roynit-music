@@ -81,8 +81,152 @@ impl Drop for PcmSource {
     }
 }
 
+struct PreparedAudio {
+    input: String,
+    headers: Vec<(String, String)>,
+    proxy: Option<String>,
+    filter: String,
+    expires: Instant,
+    source: PcmSource,
+    error: Arc<Mutex<String>>,
+}
+
+fn open_decoder(
+    input: &str,
+    headers: &[(String, String)],
+    proxy: Option<&str>,
+    filter: &str,
+    seconds: f64,
+) -> Result<(PcmSource, Arc<Mutex<String>>)> {
+    let mut command = tools::command("ffmpeg");
+    command.args(["-v", "error", "-nostdin"]);
+    if input.starts_with("http") {
+        if let Some(proxy) = proxy {
+            command.args(["-http_proxy", proxy]);
+        }
+        command.args([
+            "-rw_timeout",
+            "20000000",
+            "-reconnect",
+            "1",
+            "-reconnect_streamed",
+            "1",
+            "-reconnect_on_network_error",
+            "1",
+            "-reconnect_delay_max",
+            "3",
+        ]);
+        if !headers.is_empty() {
+            let h: String = headers
+                .iter()
+                .filter(|(k, v)| !k.contains(['\r', '\n']) && !v.contains(['\r', '\n']))
+                .map(|(k, v)| format!("{k}: {v}\r\n"))
+                .collect();
+            command.args(["-headers", &h]);
+        }
+    }
+    let mut child = command
+        .args([
+            "-ss",
+            &seconds.to_string(),
+            "-i",
+            input,
+            "-vn",
+            "-af",
+            filter,
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "pipe:1",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("Cannot start FFmpeg audio decoder")?;
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut stderr = child.stderr.take().unwrap();
+    let child = Arc::new(Mutex::new(child));
+    let error = Arc::new(Mutex::new(String::new()));
+    // Drain diagnostics continuously with bounded retention; a recovered warning is not failure.
+    let diagnostics = std::thread::spawn(move || {
+        let mut retained = Vec::new();
+        let mut block = [0u8; 4096];
+        while let Ok(n) = stderr.read(&mut block) {
+            if n == 0 {
+                break;
+            }
+            let room = 16_384usize.saturating_sub(retained.len());
+            retained.extend_from_slice(&block[..n.min(room)]);
+        }
+        String::from_utf8_lossy(&retained).into_owned()
+    });
+    let (sender, receiver) = mpsc::sync_channel(8);
+    let decoder_child = child.clone();
+    let decoder_error = error.clone();
+    std::thread::spawn(move || {
+        loop {
+            let mut block = vec![0; 4096];
+            let mut n = 0;
+            while n < block.len() {
+                match stdout.read(&mut block[n..]) {
+                    Ok(0) | Err(_) => break,
+                    Ok(m) => n += m,
+                }
+            }
+            if n == 0 {
+                break;
+            }
+            let samples = block[..n]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|s| f32::from_le_bytes(*s))
+                .collect();
+            if sender.send(samples).is_err() {
+                break;
+            }
+        }
+        // Do not hold the child mutex across wait(): Stop/Drop must be able to kill it.
+        let status = loop {
+            let result = decoder_child
+                .lock()
+                .ok()
+                .and_then(|mut c| c.try_wait().ok());
+            match result {
+                Some(Some(status)) => break Some(status),
+                Some(None) => std::thread::sleep(Duration::from_millis(10)),
+                None => break None,
+            }
+        };
+        let diagnostic = diagnostics.join().unwrap_or_default();
+        if let Ok(mut error) = decoder_error.lock() {
+            *error = terminal_error(status.is_some_and(|s| s.success()), &diagnostic);
+        }
+        // Publish terminal state before EOF: Engine must never advance past an unreported failure.
+        drop(sender);
+    });
+    let source = PcmSource {
+        child,
+        receiver,
+        block: Vec::new().into_iter(),
+        meter: Arc::new(Mutex::new(Meter {
+            buffering: true,
+            ..Default::default()
+        })),
+        clock: Arc::new(AtomicU64::new(0)),
+    };
+    Ok((source, error))
+}
+
 pub struct Player {
     stream: Option<OutputStream>,
+    prepared: [Option<PreparedAudio>; 2],
     sink: Option<Sink>,
     outgoing: Option<(Sink, Instant, f64)>,
     input: Option<String>,
@@ -101,6 +245,7 @@ impl Default for Player {
     fn default() -> Self {
         Self {
             stream: None,
+            prepared: [None, None],
             sink: None,
             outgoing: None,
             input: None,
@@ -118,6 +263,50 @@ impl Default for Player {
     }
 }
 impl Player {
+    pub(crate) fn expire_prepared_audio(&mut self) {
+        for slot in &mut self.prepared {
+            if slot
+                .as_ref()
+                .is_some_and(|audio| audio.expires <= Instant::now() || audio.proxy != self.proxy)
+            {
+                *slot = None;
+            }
+        }
+    }
+
+    pub(crate) fn prepare_audio(
+        &mut self,
+        input: String,
+        headers: Vec<(String, String)>,
+        effects: &Effects,
+        preview: bool,
+    ) -> Result<()> {
+        let filter = media::filter(effects)?;
+        if self.prepared.iter().flatten().any(|audio| {
+            audio.input == input
+                && audio.headers == headers
+                && audio.proxy == self.proxy
+                && audio.filter == filter
+                && audio.expires.saturating_duration_since(Instant::now()) > Duration::from_secs(22)
+                && audio.error.lock().is_ok_and(|error| error.is_empty())
+        }) {
+            return Ok(());
+        }
+        let slot = &mut self.prepared[usize::from(preview)];
+        *slot = None;
+        let (source, error) = open_decoder(&input, &headers, self.proxy.as_deref(), &filter, 0.)?;
+        *slot = Some(PreparedAudio {
+            input,
+            headers,
+            proxy: self.proxy.clone(),
+            filter,
+            expires: Instant::now() + Duration::from_secs(35),
+            source,
+            error,
+        });
+        Ok(())
+    }
+
     pub fn devices() -> Result<Value> {
         let host = cpal::default_host();
         let default = host.default_output_device().and_then(|d| d.name().ok());
@@ -191,124 +380,37 @@ impl Player {
             self.outgoing.take();
         }
         let input = self.input.as_ref().context("Nothing loaded")?;
-        let mut command = tools::command("ffmpeg");
-        command.args(["-v", "error", "-nostdin"]);
-        if input.starts_with("http") {
-            if let Some(proxy) = &self.proxy {
-                command.args(["-http_proxy", proxy]);
-            }
-            command.args([
-                "-rw_timeout",
-                "20000000",
-                "-reconnect",
-                "1",
-                "-reconnect_streamed",
-                "1",
-                "-reconnect_on_network_error",
-                "1",
-                "-reconnect_delay_max",
-                "3",
-            ]);
-            if !self.headers.is_empty() {
-                let h: String = self
-                    .headers
-                    .iter()
-                    .filter(|(k, v)| !k.contains(['\r', '\n']) && !v.contains(['\r', '\n']))
-                    .map(|(k, v)| format!("{k}: {v}\r\n"))
-                    .collect();
-                command.args(["-headers", &h]);
-            }
-        }
-        let mut child = command
-            .args([
-                "-ss",
-                &seconds.to_string(),
-                "-i",
+        let filter = media::filter(&self.effects)?;
+        let ready = if seconds == 0. {
+            self.prepared
+                .iter_mut()
+                .find(|slot| {
+                    slot.as_ref().is_some_and(|audio| {
+                        audio.expires > Instant::now()
+                            && audio.input == *input
+                            && audio.headers == self.headers
+                            && audio.proxy == self.proxy
+                            && audio.filter == filter
+                            && audio.error.lock().is_ok_and(|error| error.is_empty())
+                    })
+                })
+                .and_then(Option::take)
+        } else {
+            None
+        };
+        let (source, error) = match ready {
+            Some(audio) => (audio.source, audio.error),
+            _ => open_decoder(
                 input,
-                "-vn",
-                "-af",
-                &media::filter(&self.effects)?,
-                "-f",
-                "f32le",
-                "-acodec",
-                "pcm_f32le",
-                "-ar",
-                "48000",
-                "-ac",
-                "2",
-                "pipe:1",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("Cannot start FFmpeg audio decoder")?;
-        let mut stdout = BufReader::new(child.stdout.take().unwrap());
-        let mut stderr = child.stderr.take().unwrap();
-        let child = Arc::new(Mutex::new(child));
-        self.error = Arc::new(Mutex::new(String::new()));
-        // Drain diagnostics continuously with bounded retention; a recovered warning is not failure.
-        let diagnostics = std::thread::spawn(move || {
-            let mut retained = Vec::new();
-            let mut block = [0u8; 4096];
-            while let Ok(n) = stderr.read(&mut block) {
-                if n == 0 {
-                    break;
-                }
-                let room = 16_384usize.saturating_sub(retained.len());
-                retained.extend_from_slice(&block[..n.min(room)]);
-            }
-            String::from_utf8_lossy(&retained).into_owned()
-        });
-        let (sender, receiver) = mpsc::sync_channel(8);
-        let decoder_child = child.clone();
-        let decoder_error = self.error.clone();
-        std::thread::spawn(move || {
-            loop {
-                let mut block = vec![0; 4096];
-                let mut n = 0;
-                while n < block.len() {
-                    match stdout.read(&mut block[n..]) {
-                        Ok(0) | Err(_) => break,
-                        Ok(m) => n += m,
-                    }
-                }
-                if n == 0 {
-                    break;
-                }
-                let samples = block[..n]
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|s| f32::from_le_bytes(*s))
-                    .collect();
-                if sender.send(samples).is_err() {
-                    break;
-                }
-            }
-            // Do not hold the child mutex across wait(): Stop/Drop must be able to kill it.
-            let status = loop {
-                let result = decoder_child
-                    .lock()
-                    .ok()
-                    .and_then(|mut c| c.try_wait().ok());
-                match result {
-                    Some(Some(status)) => break Some(status),
-                    Some(None) => std::thread::sleep(Duration::from_millis(10)),
-                    None => break None,
-                }
-            };
-            let diagnostic = diagnostics.join().unwrap_or_default();
-            if let Ok(mut error) = decoder_error.lock() {
-                *error = terminal_error(status.is_some_and(|s| s.success()), &diagnostic);
-            }
-            // Publish terminal state before EOF: Engine must never advance past an unreported failure.
-            drop(sender);
-        });
-        self.meter = Arc::new(Mutex::new(Meter {
-            buffering: true,
-            ..Default::default()
-        }));
+                &self.headers,
+                self.proxy.as_deref(),
+                &filter,
+                seconds,
+            )?,
+        };
+        self.meter = source.meter.clone();
+        self.clock = source.clock.clone();
+        self.error = error;
         let sink = Sink::connect_new(self.stream.as_ref().context("No audio output")?.mixer());
         sink.pause();
         sink.set_volume(if self.effects.muted {
@@ -316,16 +418,6 @@ impl Player {
         } else {
             self.effects.volume
         });
-        let source = PcmSource {
-            child,
-            receiver,
-            block: vec![].into_iter(),
-            meter: self.meter.clone(),
-            clock: {
-                self.clock = Arc::new(AtomicU64::new(0));
-                self.clock.clone()
-            },
-        };
         sink.append(source);
         if let Some(old) = self.sink.take()
             && crossfade
@@ -361,6 +453,7 @@ impl Player {
         Ok(())
     }
     pub fn stop(&mut self) {
+        self.prepared = [None, None];
         self.sink.take();
         self.outgoing.take();
         self.input = None;

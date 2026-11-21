@@ -8,6 +8,9 @@ use std::{
 
 type StreamCache = std::collections::HashMap<String, (std::time::Instant, Value)>;
 static STREAMS: std::sync::OnceLock<std::sync::Mutex<StreamCache>> = std::sync::OnceLock::new();
+static DIRECT_FAILURES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = std::sync::OnceLock::new();
 
 pub struct Providers {
     pub cookies: Option<PathBuf>,
@@ -86,6 +89,24 @@ impl Providers {
         if let Ok(mut cache) = STREAMS.get_or_init(Default::default).lock() {
             cache.remove(&self.cache_key(track));
         }
+    }
+    pub(crate) fn recover_stream(&self, track: &Track) {
+        if let Some(stream) = self.cached(track)
+            && stream["resolver"] == "direct_youtube"
+        {
+            let source = stream["playback_source"].as_str().unwrap_or(&track.source);
+            if let Ok(mut failures) = DIRECT_FAILURES.get_or_init(Default::default).lock() {
+                failures.retain(|_, time| time.elapsed() < Duration::from_secs(60));
+                if failures.len() >= 64 {
+                    failures.clear();
+                }
+                failures.insert(source.into(), std::time::Instant::now());
+            }
+            if let Ok(mut cache) = STREAMS.get_or_init(Default::default).lock() {
+                cache.retain(|_, (_, value)| value["url"] != stream["url"]);
+            }
+        }
+        self.invalidate(track);
     }
     pub fn cached(&self, track: &Track) -> Option<Value> {
         STREAMS
@@ -178,17 +199,43 @@ impl Providers {
         }
 
         validate_url(&track.source)?;
+        #[cfg(test)]
+        EXTRACTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        if matches!(track.platform.as_str(), "youtube" | "ytmusic")
+            && self.proxy.is_none()
+            && self.cookies.is_none()
+            && self.browser.is_none()
+            && !DIRECT_FAILURES
+                .get_or_init(Default::default)
+                .lock()
+                .ok()
+                .is_some_and(|failures| {
+                    failures
+                        .get(&track.source)
+                        .is_some_and(|time| time.elapsed() < Duration::from_secs(60))
+                })
+            && let Some(stream) = crate::youtube_stream::resolve(&track.source)
+        {
+            return Ok(stream);
+        }
+        crate::jobs::check_cancelled()?;
+        // Prefer a single, directly readable audio stream for YouTube playback.
+        // Keep the broader selector for videos without a progressive audio format.
+        let format = if matches!(track.platform.as_str(), "youtube" | "ytmusic") {
+            "ba[ext=m4a][protocol=https]/ba[ext=webm][protocol=https]/bestaudio/best"
+        } else {
+            "bestaudio/best"
+        };
         let mut a = self.args();
         a.extend([
             "--no-playlist".into(),
             "-f".into(),
-            "bestaudio/best".into(),
+            format.into(),
             "--dump-single-json".into(),
             "--".into(),
             track.source.clone(),
         ]);
-        #[cfg(test)]
-        EXTRACTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let v = tools::json("yt-dlp", &a)?;
         let url = v["url"]
             .as_str()

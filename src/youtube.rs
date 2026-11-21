@@ -167,11 +167,34 @@ impl Music<'_> {
         }
         let value = self.request("browse", body)?;
         Ok(
-            json!({"source":"youtube_music","browse_id":id,"tracks":parse_tracks(&value),"items":parse_items(&value),"continuation":find_continuation(&value)}),
+            json!({"source":"youtube_music","browse_id":id,"generated_mixes":if id=="FEmusic_home"{parse_generated_mixes(&value)}else{vec![]},"authenticated_session":value.pointer("/responseContext/mainAppWebResponseContext/loggedOut").and_then(Value::as_bool).map(|out|!out),"tracks":parse_tracks(&value),"items":parse_items(&value),"continuation":find_continuation(&value)}),
         )
     }
     pub fn home(&self) -> Result<Value> {
         self.browse("FEmusic_home", None)
+    }
+    pub(crate) fn generated_mix(
+        &self,
+        id: &str,
+        video: Option<&str>,
+        params: Option<&str>,
+    ) -> Result<Vec<Track>> {
+        ensure!(is_generated_mix_id(id), "Invalid generated playlist ID");
+        let mut body = json!({"playlistId":id,"isAudioOnly":true});
+        if let Some(video) = video {
+            validate_video(video)?;
+            body["videoId"] = json!(video);
+        }
+        if let Some(params) = params.filter(|p| p.len() <= 20000) {
+            body["params"] = json!(params);
+        }
+        let response = self.request("next", body)?;
+        let tracks: Vec<_> = parse_tracks(&response).into_iter().take(24).collect();
+        ensure!(
+            !tracks.is_empty(),
+            "YouTube Music returned no tracks for this mix"
+        );
+        Ok(tracks)
     }
     pub fn charts(&self) -> Result<Value> {
         self.browse("FEmusic_charts", None)
@@ -445,6 +468,37 @@ pub fn parse_items(value: &Value) -> Vec<Value> {
         Some(json!({"id":id,"kind":kind,"title":title,"subtitle":text(&row["subtitle"]),"params":browse["params"],"cover":first(&row,"thumbnails").and_then(|t|t.as_array()?.last()?["url"].as_str().map(str::to_string))}))
     }).collect()
 }
+fn is_generated_mix_id(id: &str) -> bool {
+    id.starts_with("RD")
+        && id.len() <= 256
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+}
+
+pub(crate) fn parse_generated_mixes(value: &Value) -> Vec<Value> {
+    let mut rows = Vec::new();
+    walk(value, "musicTwoRowItemRenderer", &mut rows);
+    walk(value, "musicResponsiveListItemRenderer", &mut rows);
+    let mut seen = HashSet::new();
+    rows.into_iter().filter_map(|row| {
+        let nav = &row["navigationEndpoint"];
+        let endpoint = [&nav["watchPlaylistEndpoint"], &nav["watchEndpoint"], &nav["browseEndpoint"]]
+            .into_iter().find(|endpoint| !endpoint.is_null()).cloned()
+            .or_else(|| first(&row, "watchPlaylistEndpoint"))?;
+        let id = endpoint["playlistId"].as_str().or(endpoint["browseId"].as_str())?;
+        let id = id.strip_prefix("VL").unwrap_or(id);
+        if !is_generated_mix_id(id) || !seen.insert(id.to_owned()) {
+            return None;
+        }
+        let title = text(&row["title"]);
+        let title = if title.is_empty() {
+            text(&row["flexColumns"][0]["musicResponsiveListItemFlexColumnRenderer"]["text"])
+        } else { title };
+        Some(json!({"id":id,"title":title,"video":endpoint["videoId"],"params":endpoint["params"]}))
+    }).collect()
+}
+
 fn find_continuation(value: &Value) -> Option<String> {
     for key in ["nextRadioContinuationData", "nextContinuationData"] {
         if let Some(v) = first(value, key)
@@ -454,4 +508,23 @@ fn find_continuation(value: &Value) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod generated_mix_tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_generated_playlist_navigation_without_including_owned_playlists() {
+        let row = |id: &str, endpoint: &str| {
+            json!({"musicTwoRowItemRenderer":{"title":{"simpleText":"Mix"},
+                "navigationEndpoint":{(endpoint):{"playlistId":id,"videoId":"dQw4w9WgXcQ"}}}})
+        };
+        let home = json!({"contents":[row("RDMM","watchPlaylistEndpoint"),row("PLmine","watchPlaylistEndpoint"),row("RDMM","watchEndpoint"),row("RDTMAKexample","watchEndpoint")]});
+        let result = parse_generated_mixes(&home);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["id"], "RDMM");
+        assert_eq!(result[1]["id"], "RDTMAKexample");
+        assert_eq!(result[0]["video"], "dQw4w9WgXcQ");
+    }
 }

@@ -237,6 +237,16 @@ pub fn youtube_library(
     kind: &str,
     playlist: Option<&str>,
 ) -> Result<Value> {
+    youtube_library_pages(client, token, kind, playlist, usize::MAX)
+}
+
+pub(crate) fn youtube_library_pages(
+    client: &reqwest::blocking::Client,
+    token: &str,
+    kind: &str,
+    playlist: Option<&str>,
+    pages: usize,
+) -> Result<Value> {
     let (route, mut query) = match kind {
         "playlists" => (
             "playlists",
@@ -268,7 +278,8 @@ pub fn youtube_library(
     let mut items = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut next = String::new();
-    loop {
+    for _ in 0..pages {
+        crate::jobs::check_cancelled()?;
         let mut q = query.clone();
         if !next.is_empty() {
             q.push(("pageToken", next));
@@ -276,6 +287,11 @@ pub fn youtube_library(
         let value: Value = client
             .get(format!("https://www.googleapis.com/youtube/v3/{route}"))
             .bearer_auth(token)
+            .timeout(std::time::Duration::from_secs(if pages == usize::MAX {
+                30
+            } else {
+                6
+            }))
             .query(&q)
             .send()?
             .error_for_status()?
