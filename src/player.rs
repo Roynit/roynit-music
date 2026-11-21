@@ -452,6 +452,9 @@ impl Player {
         self.sink.as_ref().context("Nothing loaded")?.play();
         Ok(())
     }
+    pub(crate) fn has_loaded_audio(&self) -> bool {
+        self.sink.is_some()
+    }
     pub fn stop(&mut self) {
         self.prepared = [None, None];
         self.sink.take();

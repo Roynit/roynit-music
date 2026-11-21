@@ -1120,6 +1120,43 @@ impl Engine {
             .filter(|i| *i < self.store.data.queue.tracks.len())
             .collect();
     }
+    fn resume_or_start(&mut self) -> Result<Value> {
+        if self.pending_play.is_some() {
+            return Ok(self.snapshot());
+        }
+        if self.player.has_loaded_audio() && !self.player.finished() {
+            self.player.resume()?;
+            return Ok(self.snapshot());
+        }
+        let queue = &self.store.data.queue;
+        if let Some(id) = queue
+            .current()
+            .or_else(|| queue.tracks.first().map(String::as_str))
+            .filter(|id| self.store.data.tracks.contains_key(*id))
+            .map(str::to_owned)
+        {
+            return self.request_playback(&id, true, 0.);
+        }
+        let saved = &self
+            .store
+            .data
+            .settings
+            .get("resume")
+            .cloned()
+            .unwrap_or(Value::Null);
+        if let Some(id) = saved["id"]
+            .as_str()
+            .filter(|id| self.store.data.tracks.contains_key(*id))
+        {
+            let position = saved["position"]
+                .as_f64()
+                .filter(|x| x.is_finite() && *x >= 0.)
+                .unwrap_or(0.);
+            return self.request_playback(id, true, position);
+        }
+        Ok(self.snapshot())
+    }
+
     fn request_playback(&mut self, id: &str, select_queue: bool, position: f64) -> Result<Value> {
         self.store.track(id)?;
         if let Some(pending) = self.pending_play.take() {
@@ -1375,7 +1412,6 @@ impl Engine {
             "player.stop",
             "jobs.cancel_all",
             "player.pause",
-            "player.toggle",
             "player.next",
             "player.previous",
             "player.next.request",
@@ -1444,7 +1480,16 @@ impl Engine {
                 }
                 Ok(result)
             },
-            "player.toggle"=>{if self.player.paused(){self.player.resume()?;}else{self.player.pause();}Ok(self.player.snapshot())},
+            "player.toggle" => {
+                if self.pending_play.is_some() {
+                    Ok(self.snapshot())
+                } else if self.player.has_loaded_audio() && !self.player.paused() && !self.player.finished() {
+                    self.player.pause();
+                    Ok(self.snapshot())
+                } else {
+                    self.resume_or_start()
+                }
+            },
             "lastfm.authorize"=>self.integrations.authorize(&self.client,p),
             "lastfm.finish"=>self.integrations.finish(&self.client),
             "lastfm.enable"=>self.integrations.enable(boolean(p,"enabled",true)),
@@ -1911,10 +1956,7 @@ impl Engine {
                 self.player.pause();
                 Ok(self.player.snapshot())
             }
-            "player.resume" => {
-                self.player.resume()?;
-                Ok(self.player.snapshot())
-            }
+            "player.resume" => self.resume_or_start(),
             "player.stop" => {
                 self.radio = None;
                 self.region_end = None;
@@ -1922,8 +1964,11 @@ impl Engine {
                 Ok(self.player.snapshot())
             }
             "player.seek" => {
-                self.player.seek(number(p, "seconds")?)?;
-                Ok(self.player.snapshot())
+                let seconds = number(p, "seconds")?;
+                if self.pending_play.is_none() && self.player.has_loaded_audio() {
+                    self.player.seek(seconds)?;
+                }
+                Ok(self.snapshot())
             }
             "player.next" | "player.previous" => {
                 let id = if command == "player.next" {

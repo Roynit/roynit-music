@@ -432,3 +432,36 @@ fn cloudflare_music_manifest_is_scoped_and_validated() {
         assert!(riff_core::updates::music_release_info(&invalid, "0.1.2").is_err());
     }
 }
+
+#[test]
+fn idle_play_and_seek_do_not_require_a_loaded_decoder() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut engine = riff_core::Engine::open(dir.path().into()).unwrap();
+    for command in ["player.resume", "player.toggle", "player.seek"] {
+        let response = engine
+            .dispatch(&serde_json::json!({"command":command,"params":{"seconds":0.5}}))
+            .unwrap();
+        assert!(response["track_id"].is_null());
+    }
+    let id = "youtube:dQw4w9WgXcQ";
+    for request in [
+        serde_json::json!({"command":"library.add","params":{"track":{"id":id,"title":"Test track","source":"https://www.youtube.com/watch?v=dQw4w9WgXcQ","platform":"youtube"}}}),
+        serde_json::json!({"command":"queue.set","params":{"tracks":[id],"index":0}}),
+    ] {
+        engine.dispatch(&request).unwrap();
+    }
+    let job = engine
+        .dispatch(&serde_json::json!({"command":"player.resume"}))
+        .unwrap();
+    assert!(job["job_id"].is_string());
+    for command in ["player.resume", "player.toggle", "player.seek"] {
+        let response = engine
+            .dispatch(&serde_json::json!({"command":command,"params":{"seconds":0.5}}))
+            .unwrap();
+        assert_eq!(response["pending_track_id"], id);
+        assert!(response["job_id"].is_null());
+    }
+    engine
+        .dispatch(&serde_json::json!({"command":"player.stop"}))
+        .unwrap();
+}
