@@ -74,6 +74,8 @@ Dùng ảnh để lấy tỷ lệ ba cột, mật độ danh sách, thứ bậc 
 | Settings | Chia thành các nhóm Phát nhạc, Giao diện, Tài khoản và nguồn, Mạng, Dữ liệu và cập nhật. Dùng nhãn ngắn, phần giải thích sát thiết lập liên quan. Kiểm đổi thiết bị, theme, proxy, đăng nhập và cập nhật. |
 | Mini player / thanh phát | Bố trí điều khiển vừa khung, trạng thái chưa phát, đang tải, đang phát và pause rõ. Kiểm tua, âm lượng, keyboard và đóng/mở chế độ mini. |
 
+Đợt chỉnh Settings tiếp theo dùng thêm `PROMPT-CLAUDE-SETTINGS.md`. File đó có ảnh mới chụp trực tiếp Riff và Spotify trên Windows cùng quy cách cho từng nhóm thiết lập.
+
 ## Chuyển động và kiểm tra
 
 Phản hồi Play ngay khi bấm. Chuyển bìa và màu khoảng 180 ms, bảng phụ khoảng 160–220 ms. Dùng chuyển động để giải thích thứ gì vừa mở, đổi hoặc được thêm vào. Giảm chuyển động thì cập nhật trực tiếp. Tránh animation lặp ở mọi thẻ và tránh hiệu ứng nặng khi cuộn hoặc phát nhạc.

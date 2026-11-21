@@ -249,6 +249,9 @@ struct App {
     artwork_since: Instant,
     side_panel: Option<Page>,
     narrow_open: bool,
+    settings_group: usize,
+    settings_query: String,
+    settings_panel_stash: Option<Option<Page>>,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, root: PathBuf) -> Self {
@@ -446,6 +449,9 @@ impl App {
             artwork_since: Instant::now(),
             side_panel: Some(Page::Queue),
             narrow_open: false,
+            settings_group: 0,
+            settings_query: String::new(),
+            settings_panel_stash: None,
         };
         if let Some(error) = media_error {
             app.error = Some(format!("Windows media session unavailable: {error}"));
@@ -456,6 +462,9 @@ impl App {
             if let Some(query) = start.strip_prefix("search:") {
                 app.query = query.into();
                 app.search();
+            } else if let Some(query) = start.strip_prefix("settings:") {
+                app.open_settings();
+                app.settings_query = query.into();
             } else if start == "mini" {
                 Self::set_mini(ctx, &mut app.compact, true);
             } else if let Some(page) = [
@@ -2176,42 +2185,46 @@ impl App {
         }
         response.on_hover_text(label)
     }
-    /// Compact on/off switch with its own label; knob slides over `animation_time`.
-    fn switch(ui: &mut egui::Ui, on: &mut bool, label: &str, hint: &str) -> egui::Response {
+    /// On/off toggle without a visible label; `label` is the screen-reader name.
+    fn toggle(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
         let accent = ui.visuals().selection.bg_fill;
-        let response = ui
-            .horizontal(|ui| {
-                let (rect, mut response) =
-                    ui.allocate_exact_size(egui::vec2(34., 20.), egui::Sense::click());
-                if response.clicked() {
-                    *on = !*on;
-                    response.mark_changed();
-                }
-                response.widget_info(|| {
-                    egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, *on, label)
-                });
-                let t = ui.ctx().animate_bool(response.id, *on);
-                let painter = ui.painter();
-                painter.rect_filled(
-                    rect,
-                    10.,
-                    Color32::from_white_alpha(40).lerp_to_gamma(accent, t),
-                );
-                if response.has_focus() {
-                    painter.rect_stroke(
-                        rect.expand(2.),
-                        12.,
-                        egui::Stroke::new(1.5_f32, accent),
-                        egui::StrokeKind::Outside,
-                    );
-                }
-                let x = egui::lerp(rect.left() + 10.0..=rect.right() - 10., t);
-                painter.circle_filled(egui::pos2(x, rect.center().y), 7., Color32::WHITE);
-                ui.label(RichText::new(label).color(TEXT));
-                response
-            })
-            .inner;
-        response.on_hover_text(hint)
+        let (rect, mut response) =
+            ui.allocate_exact_size(egui::vec2(34., 20.), egui::Sense::click());
+        if response.clicked() {
+            *on = !*on;
+            response.mark_changed();
+        }
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *on, label)
+        });
+        let t = ui.ctx().animate_bool(response.id, *on);
+        let painter = ui.painter();
+        painter.rect_filled(
+            rect,
+            10.,
+            Color32::from_white_alpha(40).lerp_to_gamma(accent, t),
+        );
+        if response.has_focus() {
+            painter.rect_stroke(
+                rect.expand(2.),
+                12.,
+                egui::Stroke::new(1.5_f32, accent),
+                egui::StrokeKind::Outside,
+            );
+        }
+        let x = egui::lerp(rect.left() + 10.0..=rect.right() - 10., t);
+        painter.circle_filled(egui::pos2(x, rect.center().y), 7., Color32::WHITE);
+        response
+    }
+    /// Toggle followed by its visible label; the longer explanation goes in the tooltip.
+    fn switch(ui: &mut egui::Ui, on: &mut bool, label: &str, hint: &str) -> egui::Response {
+        ui.horizontal(|ui| {
+            let response = Self::toggle(ui, on, label);
+            ui.label(RichText::new(label).color(TEXT));
+            response
+        })
+        .inner
+        .on_hover_text(hint)
     }
     /// Menu row: check mark and a light fill for the active choice, never a full accent bar.
     fn menu_item(ui: &mut egui::Ui, checked: bool, label: &str) -> egui::Response {
@@ -2976,6 +2989,9 @@ impl App {
     }
     fn open_settings(&mut self) {
         self.page = Page::Settings;
+        if self.settings_panel_stash.is_none() {
+            self.settings_panel_stash = Some(self.side_panel.take());
+        }
         for (tag, command) in [
             ("plugins", "plugins.list"),
             ("lastfm-status", "lastfm.status"),
@@ -2988,109 +3004,1080 @@ impl App {
             self.send(tag, command, json!({}));
         }
     }
-    fn settings_playback(&mut self, ui: &mut egui::Ui) {
-        ui.push_id("Playback & offline storage",|ui|{
-            ui.horizontal(|ui|{
-                egui::ComboBox::from_label("Output device").selected_text(if self.selected_device.is_empty(){"System default"}else{&self.selected_device}).show_ui(ui,|ui|{
-                    ui.selectable_value(&mut self.selected_device,String::new(),"System default");
-                    for name in self.devices.clone(){ui.selectable_value(&mut self.selected_device,name.clone(),name);}
-                });
-                if ui.button("Use output device").clicked(){self.send("device","player.device",json!({"name":if self.selected_device.is_empty(){None}else{Some(&self.selected_device)}}));}
-                if ui.button("Refresh devices").clicked(){self.send("devices","player.devices",json!({}));}
-            });
-            ui.horizontal(|ui|{
-                ui.label("Sleep timer (minutes)");ui.add(egui::DragValue::new(&mut self.sleep_minutes).range(1..=720));
-                if ui.button("Start sleep timer").clicked(){self.send("sleep","player.sleep",json!({"seconds":self.sleep_minutes*60}));}
-                if ui.button("Cancel sleep timer").clicked(){self.send("sleep","player.sleep",json!({"seconds":0}));}
-                if let Some(seconds)=self.player["sleep_remaining"].as_u64(){ui.label(format!("Remaining {}",time(seconds as f64)));}
-            });
-            ui.horizontal(|ui|{
-                self.autoplay_toggle(ui);
-                let changed=ui.add(egui::Slider::new(&mut self.effects.crossfade_seconds,0.0..=12.).text("Crossfade (seconds)")).changed();
-                let normalize=ui.checkbox(&mut self.effects.normalize,"Normalize volume").changed();
-                if changed||normalize{self.effects_pending=Some(Instant::now());}
-            });
-            ui.horizontal(|ui|{
-                ui.label("Offline download format");let mut format=self.library.settings.get("download_format").and_then(Value::as_str).unwrap_or("opus").to_owned();let before=format.clone();
-                egui::ComboBox::from_label("Audio format").selected_text(&format).show_ui(ui,|ui|{for value in ["opus","mp3","flac","m4a","wav"]{ui.selectable_value(&mut format,value.into(),value);}});
-                if format!=before{self.send("preferences","settings.set",json!({"download_format":format}));}
-            });
-            ui.horizontal(|ui|{
-                ui.label("Cache limit (MB)");ui.add(egui::DragValue::new(&mut self.cache_limit_mb).range(64..=65536));
-                if ui.button("Apply cache limit").clicked(){self.send("cache","cache.limit",json!({"mb":self.cache_limit_mb}));}
-                if ui.button("Refresh cache").clicked(){self.send("cache","cache.status",json!({}));}
-                if ui.button("Clear cache").clicked(){self.send("cache","cache.clear",json!({}));}
-            });
-            ui.label(format!("Cached: {:.1} MB; active audio is protected during cleanup",self.cache_info["bytes"].as_u64().unwrap_or(0)as f64/1048576.));
-        });
+    fn matches(query: &str, texts: &[&str]) -> bool {
+        let query = query.trim().to_lowercase();
+        query.is_empty() || texts.iter().any(|t| t.to_lowercase().contains(&query))
     }
-    fn settings_appearance(&mut self, ui: &mut egui::Ui) {
-        ui.push_id("Appearance & visualizer",|ui|{
-            egui::ComboBox::from_label("Theme mode").selected_text(&self.appearance.mode).show_ui(ui,|ui|{ui.selectable_value(&mut self.appearance.mode,"dark".into(),"Dark");ui.selectable_value(&mut self.appearance.mode,"light".into(),"Light");});
-            ui.horizontal(|ui|{ui.label("Accent color");ui.color_edit_button_srgb(&mut self.appearance.accent);});
-            ui.add(egui::Slider::new(&mut self.appearance.font_size,12.0..=24.).text("Text size"));
-            ui.checkbox(&mut self.appearance.reduced_motion,"Reduce motion");
-            egui::ComboBox::from_label("Music visualizer").selected_text(&self.appearance.visualizer).show_ui(ui,|ui|{for style in ["off","bars","waveform"]{ui.selectable_value(&mut self.appearance.visualizer,style.into(),style);}});
-            if ui.button("Apply appearance").clicked(){self.send("appearance","appearance.set",json!(self.appearance));}
-            ui.horizontal(|ui|{
-                ui.label("Theme name");ui.text_edit_singleline(&mut self.theme_name);
-                if ui.button("Save theme").clicked()&&!self.theme_name.trim().is_empty(){let id=format!("user-{}",uuid::Uuid::new_v4());self.send("theme","themes.save",json!({"id":id,"name":self.theme_name,"tokens":self.appearance}));self.send("themes","themes.list",json!({}));}
-                if ui.button("Import theme / original settings").clicked()&&let Some(path)=rfd::FileDialog::new().add_filter("Riff JSON theme or settings",&["json"]).pick_file(){self.send("theme-import","themes.import",json!({"path":path}));}
-                if ui.button("Export appearance").clicked()&&let Some(path)=rfd::FileDialog::new().set_file_name("riff-theme.json").save_file(){let value=json!({"id":"exported-theme","name":"My Riff theme","tokens":self.appearance});if let Err(e)=riff_core::store::write_json(&path,&value){self.error=Some(e.to_string());}}
+    /// One setting per row: name and an optional one-line hint on the left, the control
+    /// right-aligned. Controls are added right to left. Narrow widths stack the control below.
+    fn row(
+        ui: &mut egui::Ui,
+        query: &str,
+        label: &str,
+        hint: &str,
+        keys: &str,
+        control: impl FnOnce(&mut egui::Ui),
+    ) {
+        if !Self::matches(query, &[label, hint, keys]) {
+            return;
+        }
+        ui.add_space(8.);
+        if ui.available_width() < 520. {
+            ui.label(RichText::new(label).color(TEXT));
+            if !hint.is_empty() {
+                ui.label(RichText::new(hint).small().color(MUTED));
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
             });
-            for theme in self.themes.clone(){ui.horizontal(|ui|{ui.label(theme["name"].as_str().unwrap_or("Theme"));if ui.button(format!("Use {}",theme["name"].as_str().unwrap_or("theme"))).clicked(){self.send("appearance","themes.apply",json!({"id":theme["id"]}));}
-if ui.button(format!("Delete theme {}",theme["name"].as_str().unwrap_or("theme"))).clicked(){self.send("theme","themes.delete",json!({"id":theme["id"]}));self.send("themes","themes.list",json!({}));}});}
-        });
-    }
-    fn settings_network(&mut self, ui: &mut egui::Ui) {
-        ui.push_id("Network & browser playback cookies",|ui|{
-            ui.label(format!("Proxy: {}",self.network_info["proxy"].as_str().unwrap_or("System network settings")));
-            ui.horizontal(|ui|{ui.label("Proxy URL (HTTP or SOCKS5)");ui.add(egui::TextEdit::singleline(&mut self.proxy_input).password(true).hint_text("http://127.0.0.1:7890"));});
-            ui.horizontal(|ui|{if ui.button("Apply proxy").clicked(){self.send("network","network.set",json!({"proxy":self.proxy_input}));}
-if ui.button("Use system network").clicked(){self.send("network","network.set",json!({"proxy":null}));}
-if ui.button("Test connection").clicked(){self.send("network-test","network.test",json!({}));}});
-            ui.label("Proxy credentials are encrypted for your Windows account. HTTP and SOCKS5 settings also route audio playback.");
-            let before=self.cookie_browser.clone();
-            egui::ComboBox::from_label("Playback cookie browser").selected_text(if self.cookie_browser.is_empty(){"Disabled"}else{&self.cookie_browser}).show_ui(ui,|ui|{ui.selectable_value(&mut self.cookie_browser,String::new(),"Disabled");for browser in ["chrome","edge","firefox","brave","vivaldi","opera"]{ui.selectable_value(&mut self.cookie_browser,browser.into(),browser);}});
-            if before!=self.cookie_browser{self.send("cookies","cookies.browser",json!({"browser":self.cookie_browser}));}
-            ui.label("Used by the playback helper only when enabled. Locked/encrypted browser cookies may be unavailable; a Netscape cookie file remains supported below.");
-        });
-    }
-    fn settings_updates(&mut self, ui: &mut egui::Ui) {
-        ui.push_id("Installation & Rust updates",|ui|{
-            if ui.button("Install for this Windows user").clicked(){self.send("install","app.install",json!({}));}
-            ui.label("Creates a Start menu shortcut. Library and account data stay in their current location.");
-            ui.horizontal(|ui|{ui.label("Rust release repository");ui.text_edit_singleline(&mut self.release_repo);if ui.button("Save release source").clicked(){self.send("preferences","updates.configure",json!({"repo":self.release_repo}));}});
-            ui.label("Official update source: Roynit/roynit-music. Clear this field to disable checks.");
-            ui.horizontal(|ui|{
-                if ui.button("Prepare previous installed version").clicked(){self.send("update","updates.rollback",json!({}));}
-                if ui.button("Check for updates").clicked(){self.send("update","updates.check",json!({}));}
-                if self.update_info["available"]==true&&ui.button("Download verified update").clicked(){self.send("update","updates.stage",json!({}));}
+        } else {
+            ui.horizontal(|ui| {
+                let left = (ui.available_width() * 0.48).max(220.);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(left, 0.),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(left);
+                        ui.label(RichText::new(label).color(TEXT));
+                        if !hint.is_empty() {
+                            ui.add(
+                                egui::Label::new(RichText::new(hint).small().color(MUTED)).wrap(),
+                            );
+                        }
+                    },
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
             });
-            let mut automatic=self.library.settings.get("auto_update_check")!=Some(&json!(false));
-            if ui.checkbox(&mut automatic,"Check for updates when Roynit starts").changed(){self.send("preferences","settings.set",json!({"auto_update_check":automatic}));}
-            if let Some(reason)=self.update_info["reason"].as_str(){ui.label(reason);}
-            if self.update_info["configured"]==false{ui.label("No release source configured");}
-            if let Some(version)=self.update_info["version"].as_str(){ui.label(format!("Latest Rust release: {version}"));}
-            if let Some(path)=self.update_info["staged_path"].as_str().map(str::to_owned){
-                ui.label(if self.update_info["rollback"]==true {"Previous version verified against the installation receipt. Applying it will restart Riff and keep library data."}else{"Update downloaded and SHA-256 verified. Applying it will close and restart Riff."});
-                if ui.button("Apply update and restart").clicked(){
-                    match riff_core::tools::command(&path).args(["--install","--wait-pid",&std::process::id().to_string(),"--launch","--data-dir"]).arg(&self.data_root).spawn(){
-                        Ok(_)=>{self.shutdown.store(true,Ordering::Relaxed);ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);}
-                        Err(e)=>self.error=Some(e.to_string()),
-                    }
+        }
+        ui.add_space(8.);
+        let r = ui.available_rect_before_wrap();
+        ui.painter().hline(
+            r.x_range(),
+            r.top(),
+            egui::Stroke::new(1.0_f32, Color32::from_white_alpha(10)),
+        );
+    }
+    fn group_title(ui: &mut egui::Ui, title: &str) {
+        ui.add_space(18.);
+        ui.label(RichText::new(title).size(20.).strong());
+        ui.add_space(2.);
+    }
+    fn settings_page(&mut self, ui: &mut egui::Ui) {
+        const GROUPS: [(&str, &str, &str); 7] = [
+            (
+                "▶",
+                "Playback",
+                "output device speaker headphones sleep timer autoplay crossfade normalize volume media keys tray mini player fullscreen lyrics yt-dlp audio tools",
+            ),
+            (
+                "⬇",
+                "Downloads & storage",
+                "download format opus mp3 flac m4a wav cache limit clear storage disk folder",
+            ),
+            (
+                "🎨",
+                "Appearance",
+                "theme dark light accent colour color text size font reduce motion animation visualizer",
+            ),
+            (
+                "👤",
+                "Accounts",
+                "google youtube spotify cookie sign in login oauth client discord last.fm lastfm scrobble account",
+            ),
+            (
+                "🌐",
+                "Network",
+                "proxy socks http connection test browser cookies",
+            ),
+            (
+                "★",
+                "Extensions",
+                "themes plugins import export native warnings",
+            ),
+            (
+                "💾",
+                "Data & updates",
+                "backup restore import export riff rfacc data folder diagnostics report install update version release rollback",
+            ),
+        ];
+        let narrow = ui.available_width() < 760.;
+        let body = |this: &mut Self, ui: &mut egui::Ui| {
+            let query = this.settings_query.clone();
+            let mut shown = 0;
+            for (index, (_, name, keys)) in GROUPS.iter().enumerate() {
+                let visible = if query.trim().is_empty() {
+                    index == this.settings_group
+                } else {
+                    Self::matches(&query, &[name, keys])
+                };
+                if !visible {
+                    continue;
                 }
+                shown += 1;
+                Self::group_title(ui, name);
+                let rows = if Self::matches(&query, &[name]) {
+                    String::new()
+                } else {
+                    query.clone()
+                };
+                let q = rows.as_str();
+                ui.push_id(name, |ui| match index {
+                    0 => this.settings_playback(ui, q),
+                    1 => this.settings_storage(ui, q),
+                    2 => this.settings_appearance(ui, q),
+                    3 => this.settings_accounts(ui, q),
+                    4 => this.settings_network(ui, q),
+                    5 => this.settings_extensions(ui, q),
+                    _ => this.settings_data(ui, q),
+                });
+            }
+            if shown == 0 {
+                ui.add_space(24.);
+                ui.label(RichText::new("No matching settings").size(18.));
+            }
+        };
+        let search = |this: &mut Self, ui: &mut egui::Ui, width: f32| {
+            ui.add(
+                egui::TextEdit::singleline(&mut this.settings_query)
+                    .hint_text("Search settings")
+                    .desired_width(width),
+            )
+            .on_hover_text("Filter by name, e.g. proxy, cache, theme");
+        };
+        if narrow {
+            ui.set_max_width(ui.available_width() - 28.);
+            search(self, ui, ui.available_width());
+            egui::ComboBox::from_id_salt("settings-group")
+                .selected_text(GROUPS[self.settings_group].1)
+                .show_ui(ui, |ui| {
+                    for (index, (_, name, _)) in GROUPS.iter().enumerate() {
+                        ui.selectable_value(&mut self.settings_group, index, *name);
+                    }
+                });
+            body(self, ui);
+        } else {
+            let column = (ui.available_width() - 200. - 20. - 28.).clamp(320., 720.);
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(200., 0.),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(200.);
+                        search(self, ui, 190.);
+                        ui.add_space(10.);
+                        ui.spacing_mut().item_spacing.y = 2.;
+                        for (index, (icon, name, _)) in GROUPS.iter().enumerate() {
+                            let active = self.settings_query.trim().is_empty()
+                                && self.settings_group == index;
+                            if self.nav_item(ui, icon, name, active).clicked() {
+                                self.settings_group = index;
+                                self.settings_query.clear();
+                            }
+                        }
+                    },
+                );
+                ui.add_space(20.);
+                ui.vertical(|ui| {
+                    ui.set_width(column);
+                    body(self, ui);
+                });
+            });
+        }
+    }
+    fn settings_playback(&mut self, ui: &mut egui::Ui, q: &str) {
+        let saved_device = self
+            .library
+            .settings
+            .get("audio_device")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        Self::row(ui, q, "Output", "", "device speaker headphones", |ui| {
+            if Self::icon_button(ui, "🔄", "Refresh devices", false).clicked() {
+                self.send("devices", "player.devices", json!({}));
+            }
+            // Apply only appears when the choice differs from what is in use.
+            if self.selected_device != saved_device && ui.button("Apply").clicked() {
+                self.send(
+                    "device",
+                    "player.device",
+                    json!({"name":if self.selected_device.is_empty(){None}else{Some(&self.selected_device)}}),
+                );
+            }
+            egui::ComboBox::from_id_salt("output-device")
+                .selected_text(if self.selected_device.is_empty() {
+                    "System default"
+                } else {
+                    &self.selected_device
+                })
+                .width(220.)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.selected_device, String::new(), "System default");
+                    for name in self.devices.clone() {
+                        ui.selectable_value(&mut self.selected_device, name.clone(), name);
+                    }
+                });
+        });
+        let remaining = self.player["sleep_remaining"].as_u64();
+        Self::row(ui, q, "Sleep timer", "", "stop pause", |ui| {
+            if let Some(seconds) = remaining {
+                if ui.button("Cancel").clicked() {
+                    self.send("sleep", "player.sleep", json!({"seconds":0}));
+                }
+                ui.label(
+                    RichText::new(format!("Stops in {}", time(seconds as f64)))
+                        .monospace()
+                        .color(MUTED),
+                );
+            } else {
+                if ui.button("Start").clicked() {
+                    self.send(
+                        "sleep",
+                        "player.sleep",
+                        json!({"seconds":self.sleep_minutes*60}),
+                    );
+                }
+                ui.add(
+                    egui::DragValue::new(&mut self.sleep_minutes)
+                        .range(1..=720)
+                        .suffix(" min"),
+                );
+            }
+        });
+        let mut autoplay = self.library.settings.get("autoplay") != Some(&json!(false));
+        Self::row(
+            ui,
+            q,
+            "Autoplay",
+            "Add similar songs when the queue ends",
+            "radio",
+            |ui| {
+                if Self::toggle(ui, &mut autoplay, "Autoplay").changed() {
+                    self.send("preferences", "settings.set", json!({"autoplay":autoplay}));
+                }
+            },
+        );
+        Self::row(ui, q, "Crossfade", "", "fade transition gap", |ui| {
+            if ui
+                .add(
+                    egui::Slider::new(&mut self.effects.crossfade_seconds, 0.0..=12.)
+                        .suffix(" s")
+                        .step_by(0.5),
+                )
+                .changed()
+            {
+                self.effects_pending = Some(Instant::now());
+            }
+        });
+        Self::row(
+            ui,
+            q,
+            "Normalize volume",
+            "Keep loudness similar between songs",
+            "loudness gain",
+            |ui| {
+                if Self::toggle(ui, &mut self.effects.normalize, "Normalize volume").changed() {
+                    self.effects_pending = Some(Instant::now());
+                }
+            },
+        );
+        let mut media_enabled = self.media_keys.is_some();
+        Self::row(
+            ui,
+            q,
+            "Media keys",
+            "Use keyboard play, pause and skip keys anywhere in Windows",
+            "global hotkeys",
+            |ui| {
+                if Self::toggle(ui, &mut media_enabled, "Media keys").changed() {
+                    if media_enabled {
+                        self.enable_media_keys();
+                    } else {
+                        self.media_keys.take();
+                    }
+                    self.send(
+                        "preferences",
+                        "settings.set",
+                        json!({"media_keys":self.media_keys.is_some()}),
+                    );
+                }
+            },
+        );
+        if self._tray.is_some() {
+            Self::row(
+                ui,
+                q,
+                "Play in tray",
+                "Keep playing when the window closes",
+                "system tray background",
+                |ui| {
+                    if Self::toggle(ui, &mut self.close_to_tray, "Play in tray").changed() {
+                        self.send(
+                            "preferences",
+                            "settings.set",
+                            json!({"close_to_tray":self.close_to_tray}),
+                        );
+                    }
+                },
+            );
+        }
+        Self::row(ui, q, "Mini player", "", "compact small window", |ui| {
+            if ui.button("Open").clicked() {
+                Self::set_mini(ui.ctx(), &mut self.compact, true);
+            }
+        });
+        Self::row(ui, q, "Fullscreen lyrics", "", "karaoke", |ui| {
+            if ui.button("Open").clicked() {
+                self.page = Page::Lyrics;
+                self.fullscreen = true;
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+            }
+        });
+        Self::row(
+            ui,
+            q,
+            "Audio tools",
+            "yt-dlp is used when a direct stream is unavailable",
+            "yt-dlp ffmpeg install",
+            |ui| {
+                if ui.button("Install or update").clicked() {
+                    self.job("tools", "tools.install", json!({"name":"yt-dlp"}));
+                }
+                if ui.button("Check").clicked() {
+                    self.send("tools", "tools.status", json!({}));
+                }
+            },
+        );
+    }
+    fn settings_storage(&mut self, ui: &mut egui::Ui, q: &str) {
+        let mut format = self
+            .library
+            .settings
+            .get("download_format")
+            .and_then(Value::as_str)
+            .unwrap_or("opus")
+            .to_owned();
+        Self::row(
+            ui,
+            q,
+            "Download format",
+            "",
+            "opus mp3 flac m4a wav audio",
+            |ui| {
+                let before = format.clone();
+                egui::ComboBox::from_id_salt("download-format")
+                    .selected_text(&format)
+                    .show_ui(ui, |ui| {
+                        for value in ["opus", "mp3", "flac", "m4a", "wav"] {
+                            ui.selectable_value(&mut format, value.into(), value);
+                        }
+                    });
+                if format != before {
+                    self.send(
+                        "preferences",
+                        "settings.set",
+                        json!({"download_format":format}),
+                    );
+                }
+            },
+        );
+        let saved_limit = self
+            .library
+            .settings
+            .get("cache_limit_mb")
+            .and_then(Value::as_u64)
+            .unwrap_or(1024);
+        Self::row(ui, q, "Cache limit", "", "storage disk size", |ui| {
+            if self.cache_limit_mb != saved_limit && ui.button("Save").clicked() {
+                self.send("cache", "cache.limit", json!({"mb":self.cache_limit_mb}));
+            }
+            ui.add(
+                egui::DragValue::new(&mut self.cache_limit_mb)
+                    .range(64..=65536)
+                    .speed(16)
+                    .suffix(" MB"),
+            );
+        });
+        let used = self.cache_info["bytes"].as_u64().unwrap_or(0) as f64 / 1_048_576.;
+        Self::row(
+            ui,
+            q,
+            "Cache used",
+            "Audio that is playing is never removed",
+            "clear storage",
+            |ui| {
+                if ui.button("Clear cache").clicked() {
+                    self.send("cache", "cache.clear", json!({}));
+                }
+                if Self::icon_button(ui, "🔄", "Refresh cache size", false).clicked() {
+                    self.send("cache", "cache.status", json!({}));
+                }
+                ui.label(
+                    RichText::new(format!("{used:.1} MB"))
+                        .monospace()
+                        .color(MUTED),
+                );
+            },
+        );
+        Self::row(ui, q, "Downloads folder", "", "offline files", |ui| {
+            if ui.button("Open").clicked() {
+                let _ = open::that(self.data_root.join("downloads"));
             }
         });
     }
-    fn section(ui: &mut egui::Ui, title: &str) {
-        ui.add_space(14.);
-        ui.label(RichText::new(title).size(20.).strong());
-        ui.add_space(4.);
+    fn settings_appearance(&mut self, ui: &mut egui::Ui, q: &str) {
+        Self::row(ui, q, "Theme", "", "dark light mode", |ui| {
+            egui::ComboBox::from_id_salt("theme-mode")
+                .selected_text(if self.appearance.mode == "light" {
+                    "Light"
+                } else {
+                    "Dark"
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.appearance.mode, "dark".into(), "Dark");
+                    ui.selectable_value(&mut self.appearance.mode, "light".into(), "Light");
+                });
+        });
+        Self::row(ui, q, "Accent", "", "colour color iris", |ui| {
+            ui.color_edit_button_srgb(&mut self.appearance.accent);
+            let [r, g, b] = self.appearance.accent;
+            ui.label(
+                RichText::new(format!("#{r:02X}{g:02X}{b:02X}"))
+                    .monospace()
+                    .color(MUTED),
+            );
+        });
+        Self::row(ui, q, "Text size", "", "font scale", |ui| {
+            ui.add(egui::Slider::new(&mut self.appearance.font_size, 12.0..=24.).suffix(" pt"));
+        });
+        Self::row(
+            ui,
+            q,
+            "Reduce motion",
+            "Change states instantly instead of animating",
+            "animation",
+            |ui| {
+                Self::toggle(ui, &mut self.appearance.reduced_motion, "Reduce motion");
+            },
+        );
+        Self::row(ui, q, "Visualizer", "", "bars waveform spectrum", |ui| {
+            egui::ComboBox::from_id_salt("visualizer")
+                .selected_text(match self.appearance.visualizer.as_str() {
+                    "bars" => "Bars",
+                    "waveform" => "Waveform",
+                    _ => "Off",
+                })
+                .show_ui(ui, |ui| {
+                    for (value, label) in
+                        [("off", "Off"), ("bars", "Bars"), ("waveform", "Waveform")]
+                    {
+                        ui.selectable_value(&mut self.appearance.visualizer, value.into(), label);
+                    }
+                });
+        });
+        // Appearance previews live; Save persists it, and only shows while there are changes.
+        let saved = self
+            .library
+            .settings
+            .get("appearance")
+            .cloned()
+            .and_then(|v| riff_core::appearance::Appearance::from_tokens(v).ok())
+            .unwrap_or_default();
+        if saved != self.appearance && Self::matches(q, &["appearance save revert"]) {
+            ui.add_space(8.);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Unsaved changes").color(MUTED));
+                if ui.button("Save").clicked() {
+                    self.send("appearance", "appearance.set", json!(self.appearance));
+                }
+                if ui.button("Revert").clicked() {
+                    self.appearance = saved;
+                }
+            });
+        }
     }
-    fn subheading(ui: &mut egui::Ui, title: &str) {
-        ui.add_space(6.);
-        ui.label(RichText::new(title).size(15.).strong());
+    fn account_row(&mut self, ui: &mut egui::Ui, q: &str, provider: usize) {
+        let (key, name, hint) = if provider == 0 {
+            (
+                "google",
+                "Google / YouTube",
+                "Likes and your playlists shape Mixes",
+            )
+        } else {
+            ("spotify", "Spotify", "Import liked songs and playlists")
+        };
+        let status = if self.account_status["provider"] == key {
+            if self.account_status["signed_in"] == true {
+                "Connected"
+            } else if self.account_status["pending"] == true {
+                "Waiting for sign-in"
+            } else {
+                "Not connected"
+            }
+        } else {
+            "Not checked"
+        };
+        Self::row(ui, q, name, hint, "account sign in login oauth", |ui| {
+            ui.menu_button("•••", |ui| {
+                if ui.button("Check connection").clicked() {
+                    self.send("account-status", "oauth.status", json!({"provider":key}));
+                    ui.close();
+                }
+                if ui.button("Refresh session").clicked() {
+                    self.send("auth", "oauth.refresh", json!({"provider":key}));
+                    ui.close();
+                }
+                if provider == 0 {
+                    if ui.button("Import YouTube likes").clicked() {
+                        self.send("import", "google.import", json!({"kind":"likes"}));
+                        ui.close();
+                    }
+                    if ui.button("Load my playlists").clicked() {
+                        self.job(
+                            "google-playlists",
+                            "google.library",
+                            json!({"kind":"playlists"}),
+                        );
+                        ui.close();
+                    }
+                } else {
+                    if ui.button("Import liked songs").clicked() {
+                        self.send("import", "spotify.import", json!({"kind":"liked"}));
+                        ui.close();
+                    }
+                    if ui.button("Load my playlists").clicked() {
+                        self.send(
+                            "spotify-playlists",
+                            "spotify.library",
+                            json!({"kind":"playlists"}),
+                        );
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.button("Disconnect").clicked() {
+                    self.retry_login = false;
+                    self.login_generation = self.login_generation.wrapping_add(1);
+                    if let Some(cancel) = &self.login_cancel {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                    self.send("logout", "oauth.logout", json!({"provider":key}));
+                    ui.close();
+                }
+            });
+            if status != "Connected"
+                && ui
+                    .button("Connect")
+                    .on_hover_text("Uses the client ID under Advanced")
+                    .clicked()
+            {
+                self.oauth_provider = provider;
+                self.login();
+            }
+            ui.label(
+                RichText::new(status)
+                    .small()
+                    .color(if status == "Connected" { AQUA } else { MUTED }),
+            );
+        });
+    }
+    fn settings_accounts(&mut self, ui: &mut egui::Ui, q: &str) {
+        Self::row(
+            ui,
+            q,
+            "YouTube Music session",
+            "Optional cookie file so YouTube can use your session",
+            "cookie netscape youtube music",
+            |ui| {
+                if ui.button("Remove").clicked() {
+                    self.send("cookies-cleared", "cookies.clear", json!({}));
+                }
+                if ui.button("Choose file…").clicked()
+                    && let Some(path) = rfd::FileDialog::new().pick_file()
+                {
+                    self.send("cookies", "cookies.set", json!({"path":path}));
+                    self.status = "YouTube cookie file configured for this session.".into();
+                }
+            },
+        );
+        self.account_row(ui, q, 0);
+        for playlist in self.google_playlists.clone() {
+            let name = playlist["snippet"]["title"]
+                .as_str()
+                .unwrap_or("YouTube playlist")
+                .to_owned();
+            Self::row(ui, q, &name, "", "youtube playlist import", |ui| {
+                if ui.button("Import").clicked() {
+                    self.send(
+                        "import",
+                        "google.import",
+                        json!({"kind":"tracks","playlist_id":playlist["id"],"name":name}),
+                    );
+                }
+            });
+        }
+        self.account_row(ui, q, 1);
+        for playlist in self.spotify_playlists.clone() {
+            let name = playlist["name"]
+                .as_str()
+                .unwrap_or("Spotify playlist")
+                .to_owned();
+            Self::row(ui, q, &name, "", "spotify playlist import", |ui| {
+                if ui.button("Import").clicked() {
+                    self.job(
+                        "import",
+                        "catalog.import",
+                        json!({"url":playlist["external_urls"]["spotify"]}),
+                    );
+                }
+            });
+        }
+        let lastfm = if self.lastfm_status["signed_in"] == true {
+            format!(
+                "Connected as {}",
+                self.lastfm_status["username"].as_str().unwrap_or("")
+            )
+        } else {
+            "Not connected".to_owned()
+        };
+        Self::row(
+            ui,
+            q,
+            "Last.fm",
+            "Scrobbles after enough real listening time",
+            "scrobble lastfm",
+            |ui| {
+                ui.menu_button("•••", |ui| {
+                    if ui.button("Authorize").clicked() {
+                        self.send(
+                            "authorize",
+                            "lastfm.authorize",
+                            json!({"api_key":self.lastfm_key,"api_secret":self.lastfm_secret}),
+                        );
+                        ui.close();
+                    }
+                    if ui.button("Finish authorization").clicked() {
+                        self.send("lastfm-status", "lastfm.finish", json!({}));
+                        ui.close();
+                    }
+                    if ui.button("Pause scrobbling").clicked() {
+                        self.send("lastfm-status", "lastfm.enable", json!({"enabled":false}));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Disconnect").clicked() {
+                        self.send("lastfm-status", "lastfm.disconnect", json!({}));
+                        ui.close();
+                    }
+                });
+                ui.label(RichText::new(&lastfm).small().color(MUTED));
+            },
+        );
+        Self::row(
+            ui,
+            q,
+            "Discord",
+            "Show the current track in your Discord status",
+            "rich presence",
+            |ui| {
+                if ui.button("Turn off").clicked() {
+                    self.send("discord", "discord.disconnect", json!({}));
+                }
+                if ui.button("Connect").clicked() {
+                    self.send(
+                        "discord",
+                        "discord.connect",
+                        json!({"application_id":self.discord_id}),
+                    );
+                }
+            },
+        );
+        if Self::matches(
+            q,
+            &["advanced oauth client id secret callback api key application"],
+        ) {
+            ui.add_space(6.);
+            egui::CollapsingHeader::new(RichText::new("Advanced").color(MUTED)).show(ui, |ui| {
+                ui.label(
+                    RichText::new("Use your own app credentials. OAuth callback: http://127.0.0.1:8751/callback")
+                        .small()
+                        .color(MUTED),
+                );
+                egui::Grid::new("account-advanced").num_columns(2).spacing([12., 8.]).show(ui, |ui| {
+                    ui.label("Sign-in provider");
+                    egui::ComboBox::from_id_salt("oauth-provider")
+                        .selected_text(if self.oauth_provider == 0 { "Google" } else { "Spotify" })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.oauth_provider, 0, "Google");
+                            ui.selectable_value(&mut self.oauth_provider, 1, "Spotify");
+                        });
+                    ui.end_row();
+                    ui.label("Client ID");
+                    ui.text_edit_singleline(&mut self.oauth_client);
+                    ui.end_row();
+                    ui.label("Client secret");
+                    ui.add(egui::TextEdit::singleline(&mut self.oauth_secret).password(true));
+                    ui.end_row();
+                    ui.label("Last.fm API key");
+                    ui.text_edit_singleline(&mut self.lastfm_key);
+                    ui.end_row();
+                    ui.label("Last.fm secret");
+                    ui.add(egui::TextEdit::singleline(&mut self.lastfm_secret).password(true));
+                    ui.end_row();
+                    ui.label("Discord app ID");
+                    ui.text_edit_singleline(&mut self.discord_id);
+                    ui.end_row();
+                });
+            });
+        }
+    }
+    fn settings_network(&mut self, ui: &mut egui::Ui, q: &str) {
+        let configured = self.network_info["proxy"].as_str().map(str::to_owned);
+        Self::row(
+            ui,
+            q,
+            "Proxy",
+            "HTTP or SOCKS5; also used for audio. Stored encrypted for your Windows account",
+            "socks http connection",
+            |ui| {
+                ui.label(
+                    RichText::new(configured.as_deref().unwrap_or("System network"))
+                        .small()
+                        .color(if configured.is_some() { AQUA } else { MUTED }),
+                );
+            },
+        );
+        if Self::matches(q, &["proxy socks http connection test"]) {
+            ui.add_space(6.);
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.proxy_input)
+                        .password(true)
+                        .hint_text("http://127.0.0.1:7890")
+                        .desired_width(240.),
+                );
+                if !self.proxy_input.trim().is_empty() && ui.button("Apply").clicked() {
+                    self.send("network", "network.set", json!({"proxy":self.proxy_input}));
+                }
+                if configured.is_some() {
+                    if ui.button("Test").clicked() {
+                        self.send("network-test", "network.test", json!({}));
+                    }
+                    if ui.button("Use system network").clicked() {
+                        self.send("network", "network.set", json!({"proxy":null}));
+                    }
+                }
+            });
+        }
+        Self::row(
+            ui,
+            q,
+            "Browser cookies for playback",
+            "Lets the playback helper reuse a signed-in browser; locked cookies may be unavailable",
+            "chrome edge firefox brave cookies",
+            |ui| {
+                let before = self.cookie_browser.clone();
+                egui::ComboBox::from_id_salt("cookie-browser")
+                    .selected_text(if self.cookie_browser.is_empty() {
+                        "Off"
+                    } else {
+                        &self.cookie_browser
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.cookie_browser, String::new(), "Off");
+                        for browser in ["chrome", "edge", "firefox", "brave", "vivaldi", "opera"] {
+                            ui.selectable_value(&mut self.cookie_browser, browser.into(), browser);
+                        }
+                    });
+                if before != self.cookie_browser {
+                    self.send(
+                        "cookies",
+                        "cookies.browser",
+                        json!({"browser":self.cookie_browser}),
+                    );
+                }
+            },
+        );
+    }
+    fn settings_extensions(&mut self, ui: &mut egui::Ui, q: &str) {
+        for area in ["themes", "plugins"] {
+            if let Some(warnings) = self.extension_status[area]["warnings"].as_array() {
+                for warning in warnings {
+                    ui.label(
+                        RichText::new(format!(
+                            "Skipped {area} file {}: {}",
+                            warning["file"].as_str().unwrap_or("manifest"),
+                            warning["error"].as_str().unwrap_or("Invalid format")
+                        ))
+                        .small()
+                        .color(Color32::from_rgb(255, 193, 198)),
+                    );
+                }
+            }
+        }
+        Self::row(ui, q, "Save current look", "", "theme save name", |ui| {
+            if ui.button("Save").clicked() && !self.theme_name.trim().is_empty() {
+                let id = format!("user-{}", uuid::Uuid::new_v4());
+                self.send(
+                    "theme",
+                    "themes.save",
+                    json!({"id":id,"name":self.theme_name,"tokens":self.appearance}),
+                );
+                self.send("themes", "themes.list", json!({}));
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut self.theme_name)
+                    .hint_text("Theme name")
+                    .desired_width(160.),
+            );
+        });
+        Self::row(
+            ui,
+            q,
+            "Themes",
+            "Import a Roynit or original Riff theme",
+            "theme import export",
+            |ui| {
+                if ui.button("Export").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .set_file_name("riff-theme.json")
+                        .save_file()
+                {
+                    let value = json!({"id":"exported-theme","name":"My Riff theme","tokens":self.appearance});
+                    if let Err(e) = riff_core::store::write_json(&path, &value) {
+                        self.error = Some(format!("Couldn't export theme: {e}"));
+                    }
+                }
+                if ui.button("Import…").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Riff JSON theme or settings", &["json"])
+                        .pick_file()
+                {
+                    self.send("theme-import", "themes.import", json!({"path":path}));
+                }
+            },
+        );
+        for theme in self.themes.clone() {
+            let name = theme["name"].as_str().unwrap_or("Theme").to_owned();
+            Self::row(ui, q, &name, "", "theme", |ui| {
+                ui.menu_button("•••", |ui| {
+                    if ui.button(format!("Delete {name}")).clicked() {
+                        self.send("theme", "themes.delete", json!({"id":theme["id"]}));
+                        self.send("themes", "themes.list", json!({}));
+                        ui.close();
+                    }
+                });
+                if ui.button("Use").clicked() {
+                    self.send("appearance", "themes.apply", json!({"id":theme["id"]}));
+                }
+            });
+        }
+        Self::row(
+            ui,
+            q,
+            "Native plugins",
+            "Run as your Windows user; enable only code you trust",
+            "plugin import manifest",
+            |ui| {
+                if ui.button("Import…").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Plugin manifest", &["json"])
+                        .pick_file()
+                {
+                    self.send("plugin", "plugins.import", json!({"path":path}));
+                }
+            },
+        );
+        for plugin in self.plugins.clone() {
+            let name = plugin["name"].as_str().unwrap_or("Plugin").to_owned();
+            Self::row(ui, q, &name, "", "plugin", |ui| {
+                let mut enabled = plugin["enabled"].as_bool().unwrap_or(false);
+                if enabled && ui.button("Run").clicked() {
+                    self.send("plugin", "plugins.run", json!({"id":plugin["id"]}));
+                }
+                if Self::toggle(ui, &mut enabled, &format!("Enable {name}")).changed() {
+                    self.send(
+                        "plugin",
+                        "plugins.enable",
+                        json!({"id":plugin["id"],"enabled":enabled}),
+                    );
+                }
+            });
+        }
+    }
+    fn settings_data(&mut self, ui: &mut egui::Ui, q: &str) {
+        Self::row(
+            ui,
+            q,
+            "Library backup",
+            "",
+            "export import restore json",
+            |ui| {
+                if ui.button("Restore…").clicked()
+                && let Some(path) = rfd::FileDialog::new().add_filter("Riff JSON", &["json"]).pick_file()
+                && rfd::MessageDialog::new()
+                    .set_title("Replace library?")
+                    .set_description("This replaces the current library with the selected backup. A before-import backup is kept.")
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show()
+                    == rfd::MessageDialogResult::Yes
+            {
+                self.send("backup", "backup.import", json!({"path":path}));
+            }
+                if ui.button("Export…").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .set_file_name("riff-library.json")
+                        .save_file()
+                {
+                    self.send("backup", "backup.export", json!({"path":path}));
+                }
+            },
+        );
+        Self::row(
+            ui,
+            q,
+            "Original Riff account",
+            "",
+            "rfacc migrate import export",
+            |ui| {
+                if ui.button("Export .rfacc…").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .set_file_name("riff-account.rfacc")
+                        .save_file()
+                {
+                    self.send("export", "account.export", json!({"path":path}));
+                }
+                if ui.button("Import…").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Original Riff account", &["rfacc", "json"])
+                        .pick_file()
+                {
+                    self.send("migration", "legacy.import", json!({"path":path}));
+                }
+            },
+        );
+        let data = self.data_root.display().to_string();
+        Self::row(ui, q, "App data", &data, "folder path", |ui| {
+            if ui.button("Open").clicked() {
+                let _ = open::that(&self.data_root);
+            }
+        });
+        Self::row(ui, q, "Diagnostic report", "", "support logs", |ui| {
+            if ui.button("Save…").clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .set_file_name("riff-diagnostics.json")
+                    .save_file()
+            {
+                self.send("support", "support.export", json!({"path":path}));
+            }
+        });
+        Self::row(
+            ui,
+            q,
+            "Start menu shortcut",
+            "Library and account data stay where they are",
+            "install",
+            |ui| {
+                if ui.button("Install").clicked() {
+                    self.send("install", "app.install", json!({}));
+                }
+            },
+        );
+        let current = env!("CARGO_PKG_VERSION");
+        let latest = self.update_info["version"].as_str().map(str::to_owned);
+        let hint = match (&latest, self.update_info["reason"].as_str()) {
+            (Some(v), _) => format!("Installed {current} · latest {v}"),
+            (None, Some(reason)) => format!("Installed {current} · {reason}"),
+            (None, None) => format!("Installed {current}"),
+        };
+        Self::row(
+            ui,
+            q,
+            "Updates",
+            &hint,
+            "version release check download",
+            |ui| {
+                ui.menu_button("•••", |ui| {
+                    if ui.button("Prepare previous version").clicked() {
+                        self.send("update", "updates.rollback", json!({}));
+                        ui.close();
+                    }
+                });
+                if self.update_info["available"] == true && ui.button("Download").clicked() {
+                    self.send("update", "updates.stage", json!({}));
+                }
+                if ui.button("Check").clicked() {
+                    self.send("update", "updates.check", json!({}));
+                }
+            },
+        );
+        if let Some(path) = self.update_info["staged_path"].as_str().map(str::to_owned) {
+            let hint = if self.update_info["rollback"] == true {
+                "Previous version verified; restarting keeps your library"
+            } else {
+                "Downloaded and SHA-256 verified; Roynit will restart"
+            };
+            Self::row(ui, q, "Ready to install", hint, "update restart", |ui| {
+                if ui.button("Restart and apply").clicked() {
+                    match riff_core::tools::command(&path)
+                        .args([
+                            "--install",
+                            "--wait-pid",
+                            &std::process::id().to_string(),
+                            "--launch",
+                            "--data-dir",
+                        ])
+                        .arg(&self.data_root)
+                        .spawn()
+                    {
+                        Ok(_) => {
+                            self.shutdown.store(true, Ordering::Relaxed);
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        Err(e) => self.error = Some(format!("Couldn't start the update: {e}")),
+                    }
+                }
+            });
+        }
+        let mut automatic = self.library.settings.get("auto_update_check") != Some(&json!(false));
+        Self::row(ui, q, "Check on start", "", "automatic update", |ui| {
+            if Self::toggle(ui, &mut automatic, "Check for updates on start").changed() {
+                self.send(
+                    "preferences",
+                    "settings.set",
+                    json!({"auto_update_check":automatic}),
+                );
+            }
+        });
+        let saved_repo = self
+            .library
+            .settings
+            .get("release_repo")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        Self::row(
+            ui,
+            q,
+            "Release source",
+            "GitHub repository; leave empty to turn checks off",
+            "github repo",
+            |ui| {
+                if self.release_repo != saved_repo && ui.button("Save").clicked() {
+                    self.send(
+                        "preferences",
+                        "updates.configure",
+                        json!({"repo":self.release_repo}),
+                    );
+                }
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.release_repo)
+                        .hint_text("Roynit/roynit-music")
+                        .desired_width(200.),
+                );
+            },
+        );
     }
     fn apply_appearance(&mut self, ctx: &egui::Context) {
         let signature = serde_json::to_string(&self.appearance).unwrap_or_default();
@@ -3864,293 +4851,7 @@ if ui.button("Test connection").clicked(){self.send("network-test","network.test
                     }
                 }
             }
-            Page::Settings => {
-                Self::section(ui, "Playback");
-                self.settings_playback(ui);
-                let mut media_enabled = self.media_keys.is_some();
-                if ui
-                    .checkbox(&mut media_enabled, "Use global media keys")
-                    .changed()
-                {
-                    if media_enabled {
-                        self.enable_media_keys();
-                    } else {
-                        self.media_keys.take();
-                    }
-                    self.send(
-                        "preferences",
-                        "settings.set",
-                        json!({"media_keys":self.media_keys.is_some()}),
-                    );
-                }
-                if self._tray.is_some()
-                    && ui
-                        .checkbox(
-                            &mut self.close_to_tray,
-                            "Keep playing in system tray when closing the window",
-                        )
-                        .changed()
-                {
-                    self.send(
-                        "preferences",
-                        "settings.set",
-                        json!({"close_to_tray":self.close_to_tray}),
-                    );
-                }
-                ui.horizontal(|ui| {
-                    if ui.button("Mini player").clicked() {
-                        Self::set_mini(ui.ctx(), &mut self.compact, true);
-                    }
-                    if ui.button("Fullscreen lyrics").clicked() {
-                        self.page = Page::Lyrics;
-                        self.fullscreen = true;
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Check audio tools").clicked() {
-                        self.send("tools", "tools.status", json!({}));
-                    }
-                    if ui.button("Install / update yt-dlp").clicked() {
-                        self.job("tools", "tools.install", json!({"name":"yt-dlp"}));
-                    }
-                });
-                Self::section(ui, "Appearance");
-                self.settings_appearance(ui);
-                Self::subheading(ui, "Extension health");
-                for area in ["themes", "plugins"] {
-                    if let Some(warnings) = self.extension_status[area]["warnings"].as_array() {
-                        for warning in warnings {
-                            ui.label(format!(
-                                "Skipped invalid {area} file {}: {}",
-                                warning["file"].as_str().unwrap_or("manifest"),
-                                warning["error"].as_str().unwrap_or("Invalid format")
-                            ));
-                        }
-                    }
-                }
-                Self::subheading(ui, "Native Rust plugins");
-                ui.label("Native plugins run as your Windows user. Enable only code you trust. Original JavaScript plugins need to be rewritten.");
-                if ui.button("Import native plugin manifest…").clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Plugin manifest", &["json"])
-                        .pick_file()
-                {
-                    self.send("plugin", "plugins.import", json!({"path":path}));
-                }
-                for plugin in self.plugins.clone() {
-                    ui.horizontal(|ui| {
-                        ui.label(plugin["name"].as_str().unwrap_or("Plugin"));
-                        let mut enabled = plugin["enabled"].as_bool().unwrap_or(false);
-                        if ui.checkbox(&mut enabled, "Enabled").changed() {
-                            self.send(
-                                "plugin",
-                                "plugins.enable",
-                                json!({"id":plugin["id"],"enabled":enabled}),
-                            );
-                        }
-                        if enabled && ui.button("Run plugin").clicked() {
-                            self.send("plugin", "plugins.run", json!({"id":plugin["id"]}));
-                        }
-                    });
-                }
-                Self::section(ui, "Accounts & sources");
-                Self::subheading(ui, "YouTube Music session");
-                ui.label("Radio works without signing in. To let YouTube use your session, choose your own exported Netscape cookie file. Personalized results remain controlled by YouTube.");
-                if ui.button("Choose YouTube cookie file…").clicked()
-                    && let Some(path) = rfd::FileDialog::new().pick_file()
-                {
-                    self.send("cookies", "cookies.set", json!({"path":path}));
-                    self.status = "YouTube cookie file configured for this session.".into();
-                }
-                if ui.button("Stop using cookie file").clicked() {
-                    self.send("cookies-cleared", "cookies.clear", json!({}));
-                }
-                ui.separator();
-                Self::subheading(ui, "Google / Spotify account");
-                ui.label("Use your own app client ID. Register callback http://127.0.0.1:8751/callback. Google sign-in uses YouTube likes and owned playlists for Mixes. A YouTube Music cookie session can also show mixes generated by YouTube itself.");
-                egui::ComboBox::from_id_salt("oauth-provider")
-                    .selected_text(if self.oauth_provider == 0 {
-                        "Google"
-                    } else {
-                        "Spotify"
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.oauth_provider, 0, "Google");
-                        ui.selectable_value(&mut self.oauth_provider, 1, "Spotify");
-                    });
-                ui.horizontal(|ui| {
-                    ui.label("Client ID");
-                    ui.text_edit_singleline(&mut self.oauth_client);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Client secret (if required)");
-                    ui.add(egui::TextEdit::singleline(&mut self.oauth_secret).password(true));
-                });
-                if ui.button("Sign in with system browser").clicked() {
-                    self.login();
-                }
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Import Spotify liked tracks").clicked() {
-                        self.send("import", "spotify.import", json!({"kind":"liked"}));
-                    }
-                    if ui.button("Load my Spotify playlists").clicked() {
-                        self.send(
-                            "spotify-playlists",
-                            "spotify.library",
-                            json!({"kind":"playlists"}),
-                        );
-                    }
-                    if ui.button("Import YouTube likes").clicked() {
-                        self.send("import", "google.import", json!({"kind":"likes"}));
-                    }
-                    if ui.button("Load my YouTube playlists").clicked() {
-                        self.job(
-                            "google-playlists",
-                            "google.library",
-                            json!({"kind":"playlists"}),
-                        );
-                    }
-                    if ui.button("Check account connection").clicked() {
-                        self.send(
-                            "account-status",
-                            "oauth.status",
-                            json!({"provider":if self.oauth_provider==0{"google"}else{"spotify"}}),
-                        );
-                    }
-                    if ui.button("Sign out selected account").clicked() {
-                        self.retry_login = false;
-                        self.login_generation = self.login_generation.wrapping_add(1);
-                        if let Some(cancel) = &self.login_cancel {
-                            cancel.store(true, Ordering::Relaxed);
-                        }
-                        self.send(
-                            "logout",
-                            "oauth.logout",
-                            json!({"provider":if self.oauth_provider==0{"google"}else{"spotify"}}),
-                        );
-                    }
-                    if ui.button("Refresh account session").clicked() {
-                        self.send(
-                            "auth",
-                            "oauth.refresh",
-                            json!({"provider":if self.oauth_provider==0{"google"}else{"spotify"}}),
-                        );
-                    }
-                });
-                if self.account_status.is_object()
-                    && !self.account_status.as_object().unwrap().is_empty()
-                {
-                    ui.label(format!(
-                        "{}: {}",
-                        self.account_status["provider"].as_str().unwrap_or(
-                            if self.oauth_provider == 0 {
-                                "google"
-                            } else {
-                                "spotify"
-                            }
-                        ),
-                        if self.account_status["signed_in"] == true {
-                            "Connected"
-                        } else if self.account_status["pending"] == true {
-                            "Waiting for sign-in"
-                        } else {
-                            "Not connected"
-                        }
-                    ));
-                }
-                for playlist in self.spotify_playlists.clone() {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(playlist["name"].as_str().unwrap_or("Spotify playlist"));
-                        if ui
-                            .button(format!(
-                                "Import {}",
-                                playlist["name"].as_str().unwrap_or("Spotify playlist")
-                            ))
-                            .clicked()
-                        {
-                            self.job(
-                                "import",
-                                "catalog.import",
-                                json!({"url":playlist["external_urls"]["spotify"]}),
-                            );
-                        }
-                    });
-                }
-                for playlist in self.google_playlists.clone() {
-                    let name = playlist["snippet"]["title"]
-                        .as_str()
-                        .unwrap_or("YouTube playlist");
-                    if ui.button(format!("Import {name}")).clicked() {
-                        self.send(
-                            "import",
-                            "google.import",
-                            json!({"kind":"tracks","playlist_id":playlist["id"],"name":name}),
-                        );
-                    }
-                }
-                ui.collapsing("Discord Rich Presence", |ui| {
-                    ui.label("Share the current track with Discord only when enabled.");
-                    ui.horizontal(|ui| {
-                        ui.label("Application ID");
-                        ui.text_edit_singleline(&mut self.discord_id);
-                    });
-                    ui.horizontal(|ui| {
-                        if ui.button("Connect Discord").clicked() {
-                            self.send(
-                                "discord",
-                                "discord.connect",
-                                json!({"application_id":self.discord_id}),
-                            );
-                        }
-                        if ui.button("Disable Discord").clicked() {
-                            self.send("discord", "discord.disconnect", json!({}));
-                        }
-                    });
-                });
-                ui.collapsing("Last.fm scrobbling",|ui|{ui.label("Uses your own Last.fm application credentials. Scrobbles only after enough actual listening time.");ui.horizontal(|ui|{ui.label("API key");ui.text_edit_singleline(&mut self.lastfm_key);});ui.horizontal(|ui|{ui.label("API secret");ui.add(egui::TextEdit::singleline(&mut self.lastfm_secret).password(true));});ui.horizontal(|ui|{if ui.button("Authorize Last.fm").clicked(){self.send("authorize","lastfm.authorize",json!({"api_key":self.lastfm_key,"api_secret":self.lastfm_secret}));}
-if ui.button("Finish Last.fm authorization").clicked(){self.send("lastfm-status","lastfm.finish",json!({}));}
-if ui.button("Disable Last.fm").clicked(){self.send("lastfm-status","lastfm.enable",json!({"enabled":false}));}
-if ui.button("Disconnect Last.fm account").clicked(){self.send("lastfm-status","lastfm.disconnect",json!({}));}});if self.lastfm_status["signed_in"]==true{ui.label(format!("Connected as {}",self.lastfm_status["username"].as_str().unwrap_or("")));}});
-                Self::section(ui, "Network");
-                self.settings_network(ui);
-                Self::section(ui, "Data & updates");
-                ui.horizontal(|ui|{
-                    if ui.button("Export backup…").clicked()&&let Some(path)=rfd::FileDialog::new().set_file_name("riff-library.json").save_file(){self.send("backup","backup.export",json!({"path":path}));}
-                    if ui.button("Import backup…").clicked()
-                        && let Some(path)=rfd::FileDialog::new().add_filter("Riff JSON",&["json"]).pick_file()
-                        && rfd::MessageDialog::new().set_title("Replace library?").set_description("This replaces the current library with the selected backup. A before-import backup is kept.").set_buttons(rfd::MessageButtons::YesNo).show()==rfd::MessageDialogResult::Yes{self.send("backup","backup.import",json!({"path":path}));}
-                });
-                if ui
-                    .button("Import original Riff account / storage…")
-                    .clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Original Riff account", &["rfacc", "json"])
-                        .pick_file()
-                {
-                    self.send("migration", "legacy.import", json!({"path":path}));
-                }
-                if ui.button("Export original Riff .rfacc…").clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .set_file_name("riff-account.rfacc")
-                        .save_file()
-                {
-                    self.send("export", "account.export", json!({"path":path}));
-                }
-                if ui.button("Open app data folder").clicked() {
-                    let _ = open::that(&self.data_root);
-                }
-                ui.label(format!("Data: {}", self.data_root.display()));
-                if ui.button("Save diagnostic report…").clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .set_file_name("riff-diagnostics.json")
-                        .save_file()
-                {
-                    self.send("support", "support.export", json!({"path":path}));
-                }
-                self.settings_updates(ui);
-            }
+            Page::Settings => self.settings_page(ui),
         }
     }
 }
@@ -4185,6 +4886,12 @@ impl eframe::App for App {
             self.login();
         }
         self.apply_appearance(ctx);
+        if self.page != Page::Settings
+            && let Some(previous) = self.settings_panel_stash.take()
+            && self.side_panel.is_none()
+        {
+            self.side_panel = previous;
+        }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Comma)) {
             self.open_settings();
         }
