@@ -1464,7 +1464,7 @@ fn main() -> eframe::Result {
     if args.silent {
         std::process::exit(run_silent(&args));
     }
-    let icon = image::load_from_memory(include_bytes!("../assets/icon.png"))
+    let icon = image::load_from_memory(include_bytes!("../assets/icon-app.png"))
         .expect("embedded icon")
         .into_rgba8();
     let (width, height) = icon.dimensions();

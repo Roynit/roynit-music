@@ -120,7 +120,7 @@ pub fn install_with(source: &Path, options: &Options) -> Result<Value> {
     )
 }
 fn create_shortcut(lnk: &Path, target: &Path) -> Result<()> {
-    let script = "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:RIFF_SHORTCUT); $s.TargetPath=$env:RIFF_INSTALL_TARGET; $s.WorkingDirectory=[IO.Path]::GetDirectoryName($env:RIFF_INSTALL_TARGET); $s.Description='Roy Music by dang'; $s.Save()";
+    let script = "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:RIFF_SHORTCUT); $s.TargetPath=$env:RIFF_INSTALL_TARGET; $s.WorkingDirectory=[IO.Path]::GetDirectoryName($env:RIFF_INSTALL_TARGET); $s.Description='Roy Music by dang'; $s.IconLocation=$env:RIFF_INSTALL_TARGET+',0'; $s.Save()";
     let result = crate::tools::command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("RIFF_SHORTCUT", lnk)

@@ -388,7 +388,7 @@ impl App {
                     context.request_repaint();
                 }
             }));
-            let image = image::load_from_memory(include_bytes!("../assets/icon.png"))?.into_rgba8();
+            let image = image::load_from_memory(include_bytes!("../assets/icon-app.png"))?.into_rgba8();
             let (width, height) = image.dimensions();
             let icon = tray_icon::Icon::from_rgba(image.into_raw(), width, height)?;
             Ok(tray_icon::TrayIconBuilder::new()
@@ -7515,7 +7515,7 @@ fn main() -> eframe::Result {
         .map(PathBuf::from)
         .or_else(|| Engine::default_root().ok())
         .expect("Cannot find data directory");
-    let image = image::load_from_memory(include_bytes!("../assets/icon.png"))
+    let image = image::load_from_memory(include_bytes!("../assets/icon-app.png"))
         .expect("embedded Roy Music icon")
         .into_rgba8();
     let (width, height) = image.dimensions();
