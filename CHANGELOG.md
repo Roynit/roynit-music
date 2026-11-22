@@ -1,3 +1,7 @@
+# Roy Music 0.1.6
+
+- Roy Music icon (black R on a green disc) is now embedded in the app and Setup, so Explorer, Start, the taskbar and shortcuts show it.
+
 # Roy Music 0.1.5
 
 - A real Windows Setup: a branded wizard that checks the PC, lists what is missing and installs it with animated progress. It installs FFmpeg/FFprobe (the media engine) and yt-dlp with SHA-256 verification, creates shortcuts and adds Roy Music to Settings → Apps with an uninstaller.
