@@ -1,4 +1,4 @@
-# Roy Music (next release, not yet versioned)
+# Roy Music 0.1.5
 
 - A real Windows Setup: a branded wizard that checks the PC, lists what is missing and installs it with animated progress. It installs FFmpeg/FFprobe (the media engine) and yt-dlp with SHA-256 verification, creates shortcuts and adds Roy Music to Settings → Apps with an uninstaller.
 - The app and Setup no longer need the Visual C++ redistributable (the C runtime is linked statically).

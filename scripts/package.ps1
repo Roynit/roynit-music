@@ -1,4 +1,4 @@
-param([switch]$SkipBuild,[switch]$RequireSigned)
+﻿param([switch]$SkipBuild,[switch]$RequireSigned)
 $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 Push-Location $projectRoot
