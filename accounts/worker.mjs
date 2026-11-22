@@ -1,0 +1,477 @@
+import { scrypt, timingSafeEqual } from "node:crypto";
+import { Buffer } from "node:buffer";
+
+const encoder = new TextEncoder();
+const DAY = 86_400;
+const PREFIX = "/api/account";
+const now = () => Math.floor(Date.now() / 1000);
+const hex = (bytes) => Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
+const random = () => hex(crypto.getRandomValues(new Uint8Array(32)));
+const digest = async (text) => hex(await crypto.subtle.digest("SHA-256", encoder.encode(text)));
+const publicUser = ({id, email, username, display_name, google_subject, bio, avatar_set, avatar_version, created_at}, base) => ({
+  id, email, username, display_name, provider: google_subject ? "google" : "password",
+  bio: bio || "", created_at,
+  // The version in the URL changes with every upload, so browsers and the app can cache it forever.
+  avatar_url: avatar_set ? base + "/avatar/" + id + "?v=" + avatar_version : null,
+});
+const reply = (body, status = 200) => Response.json(body, {
+  status, headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" },
+});
+class HttpError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+async function json(request, limit = 8192) {
+  if (!request.headers.get("content-type")?.startsWith("application/json") || !request.body) {
+    throw new HttpError(400, "Expected JSON");
+  }
+  const reader = request.body.getReader();
+  const decoder = new TextDecoder("utf-8", {fatal:true});
+  let size = 0;
+  let text = "";
+  try {
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) { await reader.cancel(); throw new HttpError(413, "Request is too large"); }
+      text += decoder.decode(value, {stream:true});
+    }
+    const value = JSON.parse(text + decoder.decode());
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw Error();
+    return value;
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    throw new HttpError(400, "Invalid JSON");
+  }
+}
+async function bytes(request, limit) {
+  if (!request.body) throw new HttpError(400, "Expected an image");
+  const reader = request.body.getReader();
+  const chunks = [];
+  let size = 0;
+  while (true) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) { await reader.cancel(); throw new HttpError(413, "That image is too large."); }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) { out.set(chunk, at); at += chunk.byteLength; }
+  return out;
+}
+// Trust the bytes, not the header: a file must start like the image type it claims to be.
+function imageMatches(type, data) {
+  const start = (...values) => values.every((value, i) => data[i] === value);
+  if (type === "image/jpeg") return start(0xff, 0xd8, 0xff);
+  if (type === "image/png") return start(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+  return type === "image/webp" && start(0x52, 0x49, 0x46, 0x46) && data[8] === 0x57 && data[9] === 0x45 && data[10] === 0x42 && data[11] === 0x50;
+}
+async function avatar(id, env) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) throw new HttpError(404, "Not found.");
+  const row = await env.DB.prepare("SELECT content_type,data FROM avatars WHERE user_id=?").bind(id).first();
+  if (!row) throw new HttpError(404, "Not found.");
+  return new Response(new Uint8Array(row.data), { headers: {
+    "content-type": row.content_type, "cache-control": "public, max-age=31536000, immutable",
+    "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'",
+    "cross-origin-resource-policy": "cross-origin",
+  }});
+}
+function passwordHash(password, salt) {
+  return new Promise((resolve, reject) => {
+    scrypt(password, salt, 32, { N: 32768, r: 8, p: 3, maxmem: 64 * 1024 * 1024 }, (error, key) => {
+      if (error) reject(error);
+      else resolve(hex(key));
+    });
+  });
+}
+function equal(a, b) {
+  const left = Buffer.from(a, "hex");
+  const right = Buffer.from(b, "hex");
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+const str = (value) => typeof value === "string" ? value : "";
+const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
+const tokenPattern = /^[0-9a-f]{64}$/;
+async function rate(env, request, scope, max, identifier = "") {
+  const stamp = now();
+  const ip = request.headers.get("cf-connecting-ip") || "local";
+  const bucket = await digest(scope + ":" + (identifier || ip));
+  const row = await env.DB.prepare(
+    "INSERT INTO auth_limits VALUES (?,1,?) ON CONFLICT(bucket) DO UPDATE SET count=CASE WHEN expires_at<=? THEN 1 ELSE count+1 END,expires_at=CASE WHEN expires_at<=? THEN excluded.expires_at ELSE expires_at END RETURNING count"
+  ).bind(bucket, stamp + 600, stamp, stamp).first();
+  if (row.count > max) throw new HttpError(429, "Too many attempts. Try again later.");
+}
+async function session(env, user) {
+  const token = random();
+  await env.DB.prepare("INSERT INTO sessions VALUES (?,?,?)")
+    .bind(await digest(token), user.id, now() + 30 * DAY).run();
+  return reply({ token, account: publicUser(user, env.PUBLIC_BASE) });
+}
+async function authenticate(request, env) {
+  const token = request.headers.get("authorization")?.match(/^Bearer ([0-9a-f]{64})$/)?.[1];
+  if (!token) throw new HttpError(401,"Sign in to continue.");
+  const hash = await digest(token);
+  const user = await env.DB.prepare("SELECT users.* FROM sessions JOIN users ON users.id=sessions.user_id WHERE token_hash=? AND expires_at>?")
+    .bind(hash, now()).first();
+  if (!user) throw new HttpError(401,"Session expired. Sign in again.");
+  return {user, hash};
+}
+async function credentials(request, env, register) {
+  await rate(env, request, register ? "register" : "login", register ? 8 : 25);
+  const body = await json(request);
+  const password = str(body.password);
+  if (password.length > 128 || !password) throw new HttpError(400,"Invalid password.");
+  if (register) {
+    const email = str(body.email).trim().toLowerCase();
+    const username = str(body.username).trim().toLowerCase();
+    if (email.length > 254 || !emailPattern.test(email) || !/^[a-z0-9_]{3,24}$/.test(username) || password.length < 12) {
+      throw new HttpError(400,"Use a valid email, a 3–24 character username and at least 12 password characters.");
+    }
+    const salt = random();
+    const hash = await passwordHash(password, salt);
+    const user = await env.DB.prepare(
+      "INSERT OR IGNORE INTO users(id,email,username,display_name,password,created_at) VALUES (?,?,?,?,?,?) RETURNING *"
+    ).bind(crypto.randomUUID(), email, username, username, "scrypt:"+salt+":"+hash, now()).first();
+    if (!user) throw new HttpError(409,"That email or username is already in use.");
+    return session(env, user);
+  }
+  const login = str(body.login).trim().toLowerCase();
+  if (!login || login.length > 254) throw new HttpError(400, "Enter your email or username.");
+  await rate(env, request, "identity", 12, login);
+  const user = await env.DB.prepare("SELECT * FROM users WHERE password IS NOT NULL AND (email=? OR username=?)")
+    .bind(login,login).first();
+  const [scheme, salt, expected] = user?.password.split(":") || ["scrypt", "0".repeat(64), "0".repeat(64)];
+  const actual = await passwordHash(password, salt);
+  if (!user || scheme !== "scrypt" || !equal(actual, expected)) throw new HttpError(401,"Email, username or password is incorrect.");
+  return session(env,user);
+}
+export default {
+  async fetch(request, env, ctx) {
+    try {
+      return await route(request, env, ctx);
+    } catch (error) {
+      if (error instanceof HttpError) return reply({error:error.message}, error.status);
+      console.error("Roynit account request failed", error.name);
+      return reply({error:"Account service unavailable."}, 500);
+    }
+  },
+};
+async function googleBegin(request, env) {
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) throw new HttpError(503,"Google sign-in is not configured.");
+  await rate(env,request,"google",12);
+  const state = random();
+  const pickup = random();
+  const verifier = random();
+  const challenge = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest("SHA-256",encoder.encode(verifier)))))
+    .replaceAll("+","-").replaceAll("/","_").replace(/=+$/,"");
+  const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  url.search = new URLSearchParams({
+    client_id:env.GOOGLE_CLIENT_ID, redirect_uri:env.PUBLIC_BASE+"/google/callback",
+    response_type:"code", scope:"openid email profile", state,
+    code_challenge:challenge, code_challenge_method:"S256", prompt:"select_account",
+  });
+  await env.DB.prepare("INSERT INTO google_attempts(state_hash,pickup_hash,verifier,expires_at) VALUES (?,?,?,?)")
+    .bind(await digest(state),await digest(pickup),verifier,now()+600).run();
+  return reply({url:url.href,pickup});
+}
+function oauthPage(success, linked = false) {
+  const heading = linked ? (success ? "Account linked" : "Linking was not completed")
+    : success ? "You’re signed in" : "Sign-in was not completed";
+  return new Response('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Roynit ID</title><style>body{background:#101014;color:#f9f8ff;font:16px system-ui;display:grid;place-items:center;min-height:90vh}main{padding:3rem;border:1px solid #313039;border-radius:24px;background:#1b1922}small{color:#beabed}</style><main><small>ROYNIT ID</small><h1>'+heading+'</h1><p>You can close this tab and return to the app.</p></main></html>',{
+    status:success ? 200 : 400,
+    headers:{"content-type":"text/html; charset=utf-8","cache-control":"no-store",
+      "referrer-policy":"no-referrer","content-security-policy":"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"},
+  });
+}
+async function googleCallback(url, env) {
+  const state = url.searchParams.get("state") || "";
+  if (!tokenPattern.test(state)) return oauthPage(false);
+  const hash = await digest(state);
+  const attempt = await env.DB.prepare("UPDATE google_attempts SET status='exchanging' WHERE state_hash=? AND status='pending' AND expires_at>? RETURNING verifier")
+    .bind(hash,now()).first();
+  if (!attempt) return oauthPage(false);
+  try {
+    const code = url.searchParams.get("code");
+    if (!code) return oauthPage(false);
+    const response = await fetch("https://oauth2.googleapis.com/token", {
+      method:"POST", body:new URLSearchParams({
+        client_id:env.GOOGLE_CLIENT_ID,client_secret:env.GOOGLE_CLIENT_SECRET,
+        code,code_verifier:attempt.verifier,grant_type:"authorization_code",redirect_uri:env.PUBLIC_BASE+"/google/callback",
+      }),
+    });
+    if (!response.ok) return oauthPage(false);
+    const {access_token} = await response.json();
+    if (!access_token) return oauthPage(false);
+    const identity = await fetch("https://openidconnect.googleapis.com/v1/userinfo",{
+      headers:{authorization:"Bearer "+access_token},
+    });
+    if (!identity.ok) return oauthPage(false);
+    const info = await identity.json();
+    if (info.email_verified !== true || !str(info.sub) || !emailPattern.test(str(info.email))) return oauthPage(false);
+    const stem = info.email.split("@")[0].toLowerCase().replace(/[^a-z0-9_]/g,"").slice(0,13) || "listener";
+    const username = stem+"_"+random().slice(0,8);
+    const id = crypto.randomUUID();
+    const user = await env.DB.prepare(
+      "INSERT INTO users(id,email,username,display_name,google_subject,created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(google_subject) DO UPDATE SET email=excluded.email RETURNING id"
+    ).bind(id,info.email,username,str(info.name).trim().slice(0,48)||username,info.sub,now()).first();
+    await env.DB.prepare("UPDATE google_attempts SET status='ready',user_id=?,verifier='' WHERE state_hash=?")
+      .bind(user.id,hash).run();
+    return oauthPage(true);
+  } finally {
+    await env.DB.prepare("UPDATE google_attempts SET status='failed',verifier='' WHERE state_hash=? AND status='exchanging'")
+      .bind(hash).run();
+  }
+}
+async function googlePickup(request, env) {
+  const {pickup} = await json(request);
+  if (!tokenPattern.test(str(pickup))) throw new HttpError(400,"Invalid sign-in request.");
+  const hash = await digest(pickup);
+  const record = await env.DB.prepare("DELETE FROM google_attempts WHERE pickup_hash=? AND expires_at>? AND status='ready' RETURNING user_id")
+    .bind(hash,now()).first();
+  if (record) {
+    const user = await env.DB.prepare("SELECT * FROM users WHERE id=?").bind(record.user_id).first();
+    return session(env,user);
+  }
+  const attempt = await env.DB.prepare("SELECT status FROM google_attempts WHERE pickup_hash=? AND expires_at>?")
+    .bind(hash,now()).first();
+  if (!attempt || attempt.status === "failed") throw new HttpError(410,"Google sign-in expired or was cancelled.");
+  return reply({pending:true},202);
+}
+function musicSnapshot(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)
+    || !input.tracks || typeof input.tracks !== "object" || Array.isArray(input.tracks)
+    || !input.playlists || typeof input.playlists !== "object" || Array.isArray(input.playlists)
+    || !Array.isArray(input.favorites) || !Array.isArray(input.history)) {
+    throw new HttpError(400,"Invalid music library.");
+  }
+  if (Object.keys(input.tracks).length>3000 || Object.keys(input.playlists).length>250 || input.history.length>3000) {
+    throw new HttpError(413,"Music library exceeds the sync limit.");
+  }
+  const tracks = Object.create(null);
+  for (const [id, t] of Object.entries(input.tracks)) {
+    if (!t || id !== t.id || !["youtube","ytmusic","soundcloud","spotify","deezer","apple","yandex","tidal","vk","tiktok"].includes(t.platform)
+       || (typeof t.source !== "string" || !/^https:\/\//i.test(t.source))) continue;
+    tracks[id] = {id,title:str(t.title).slice(0,512),artist:str(t.artist).slice(0,512),album:str(t.album).slice(0,512),
+      duration:Number.isFinite(t.duration) && t.duration>=0 ? t.duration : 0,source:t.source.slice(0,2048),
+      platform:t.platform,cover:/^https:\/\//i.test(str(t.cover)) ? t.cover.slice(0,2048) : null};
+  }
+  const playlists = Object.create(null);
+  for (const [id,p] of Object.entries(input.playlists)) {
+    if (p && p.id===id && Array.isArray(p.tracks)) {
+      playlists[id]={id,name:str(p.name).slice(0,200),tracks:p.tracks.filter((id)=>typeof id==="string" && tracks[id])};
+    }
+  }
+  return {tracks,playlists,favorites:input.favorites.filter((id)=>typeof id==="string" && tracks[id]),
+    history:input.history.filter((event)=>event && typeof event.track_id==="string" && tracks[event.track_id] && Number.isSafeInteger(event.started_at))
+      .map(({track_id,started_at})=>({track_id,started_at}))};
+}
+// ---- Linked provider accounts: the Worker keeps the refresh token, the app only ever receives short-lived access tokens ----
+const PROVIDERS = {
+  google: {
+    auth:"https://accounts.google.com/o/oauth2/v2/auth", token:"https://oauth2.googleapis.com/token",
+    identity:"https://openidconnect.googleapis.com/v1/userinfo", id:"GOOGLE_CLIENT_ID", secret:"GOOGLE_CLIENT_SECRET",
+    scope:"openid email profile https://www.googleapis.com/auth/youtube.readonly",
+    extra:{access_type:"offline", prompt:"consent", include_granted_scopes:"true"},
+    label:(info)=>str(info.email),
+  },
+  spotify: {
+    auth:"https://accounts.spotify.com/authorize", token:"https://accounts.spotify.com/api/token",
+    identity:"https://api.spotify.com/v1/me", id:"SPOTIFY_CLIENT_ID", secret:"SPOTIFY_CLIENT_SECRET",
+    scope:"playlist-read-private playlist-read-collaborative user-library-read",
+    extra:{show_dialog:"true"},
+    label:(info)=>str(info.display_name) || str(info.id),
+  },
+};
+// OAUTH_TEST_BASE is only ever set by the local smoke test, which points the providers at a mock server.
+const providerUrl = (env, name, key) => env.OAUTH_TEST_BASE ? env.OAUTH_TEST_BASE+"/"+name+"/"+key : PROVIDERS[name][key];
+const configured = (env, name) => !!(env.LINK_KEY && env[PROVIDERS[name].id] && env[PROVIDERS[name].secret]);
+const available = (env) => ({google:configured(env,"google"),spotify:configured(env,"spotify")});
+async function linkKey(env) {
+  const raw = env.LINK_KEY ? Buffer.from(env.LINK_KEY,"base64") : null;
+  if (!raw || raw.length!==32) throw new HttpError(503,"Account linking is not configured.");
+  return crypto.subtle.importKey("raw",raw,"AES-GCM",false,["encrypt","decrypt"]);
+}
+async function seal(env, text, aad) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const sealed = await crypto.subtle.encrypt({name:"AES-GCM",iv,additionalData:encoder.encode(aad)},await linkKey(env),encoder.encode(text));
+  return Buffer.concat([iv,Buffer.from(sealed)]).toString("base64");
+}
+async function unseal(env, value, aad) {
+  const raw = Buffer.from(value,"base64");
+  const plain = await crypto.subtle.decrypt({name:"AES-GCM",iv:raw.subarray(0,12),additionalData:encoder.encode(aad)},await linkKey(env),raw.subarray(12));
+  return new TextDecoder().decode(plain);
+}
+async function linkList(env, user) {
+  const {results} = await env.DB.prepare("SELECT provider,label,linked_at FROM links WHERE user_id=?").bind(user.id).all();
+  return {links:results,available:available(env)};
+}
+async function linkStart(request, env, user, provider) {
+  if (!configured(env,provider)) throw new HttpError(503,"This account cannot be linked yet. It has not been set up on the server.");
+  await rate(env,request,"link",10,user.id);
+  const config = PROVIDERS[provider];
+  const state = random();
+  const verifier = random();
+  const challenge = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest("SHA-256",encoder.encode(verifier)))))
+    .replaceAll("+","-").replaceAll("/","_").replace(/=+$/,"");
+  const url = new URL(providerUrl(env,provider,"auth"));
+  url.search = new URLSearchParams({
+    client_id:env[config.id], redirect_uri:env.PUBLIC_BASE+"/link/callback", response_type:"code", scope:config.scope,
+    state, code_challenge:challenge, code_challenge_method:"S256", ...config.extra,
+  });
+  await env.DB.prepare("INSERT INTO link_attempts(state_hash,user_id,provider,verifier,expires_at) VALUES (?,?,?,?,?)")
+    .bind(await digest(state),user.id,provider,verifier,now()+600).run();
+  return reply({url:url.href});
+}
+async function providerToken(env, provider, fields) {
+  const config = PROVIDERS[provider];
+  try {
+    return await fetch(providerUrl(env,provider,"token"),{method:"POST",body:new URLSearchParams({
+      client_id:env[config.id], client_secret:env[config.secret], ...fields,
+    })});
+  } catch {
+    throw new HttpError(502,"The provider is not responding. Try again soon.");
+  }
+}
+async function linkCallback(url, env) {
+  const state = url.searchParams.get("state") || "";
+  if (!tokenPattern.test(state)) return oauthPage(false,true);
+  const hash = await digest(state);
+  const attempt = await env.DB.prepare("UPDATE link_attempts SET status='exchanging' WHERE state_hash=? AND status='pending' AND expires_at>? RETURNING user_id,provider,verifier")
+    .bind(hash,now()).first();
+  if (!attempt) return oauthPage(false,true);
+  try {
+    const code = url.searchParams.get("code");
+    if (!code) return oauthPage(false,true);
+    const response = await providerToken(env,attempt.provider,{
+      grant_type:"authorization_code", code, code_verifier:attempt.verifier, redirect_uri:env.PUBLIC_BASE+"/link/callback",
+    });
+    if (!response.ok) return oauthPage(false,true);
+    const {access_token, refresh_token} = await response.json();
+    // Without a refresh token the app would lose access after an hour, so treat it as a failed link.
+    if (!access_token || !refresh_token) return oauthPage(false,true);
+    let label = "";
+    try {
+      const identity = await fetch(providerUrl(env,attempt.provider,"identity"),{headers:{authorization:"Bearer "+access_token}});
+      if (identity.ok) label = PROVIDERS[attempt.provider].label(await identity.json()).slice(0,120);
+    } catch {}
+    await env.DB.prepare("INSERT INTO links(user_id,provider,label,refresh,linked_at) VALUES (?,?,?,?,?) ON CONFLICT(user_id,provider) DO UPDATE SET label=excluded.label,refresh=excluded.refresh,linked_at=excluded.linked_at")
+      .bind(attempt.user_id,attempt.provider,label,await seal(env,refresh_token,attempt.user_id+":"+attempt.provider),now()).run();
+    return oauthPage(true,true);
+  } finally {
+    await env.DB.prepare("DELETE FROM link_attempts WHERE state_hash=?").bind(hash).run();
+  }
+}
+async function linkToken(request, env, user, provider) {
+  await rate(env,request,"linktoken",60,user.id);
+  const row = await env.DB.prepare("SELECT refresh FROM links WHERE user_id=? AND provider=?").bind(user.id,provider).first();
+  if (!row) throw new HttpError(404,"This account is not linked.");
+  const aad = user.id+":"+provider;
+  const response = await providerToken(env,provider,{grant_type:"refresh_token",refresh_token:await unseal(env,row.refresh,aad)});
+  if (!response.ok) {
+    // The user revoked access (or the grant expired): drop the link so the app offers to connect again.
+    if (response.status===400 || response.status===401) {
+      await env.DB.prepare("DELETE FROM links WHERE user_id=? AND provider=?").bind(user.id,provider).run();
+      throw new HttpError(409,"Access was revoked. Link the account again.");
+    }
+    throw new HttpError(502,"The provider is not responding. Try again soon.");
+  }
+  const {access_token, expires_in, refresh_token} = await response.json();
+  if (!access_token) throw new HttpError(502,"The provider is not responding. Try again soon.");
+  if (refresh_token) {
+    await env.DB.prepare("UPDATE links SET refresh=? WHERE user_id=? AND provider=?").bind(await seal(env,refresh_token,aad),user.id,provider).run();
+  }
+  return reply({access_token,expires_in:Number.isFinite(expires_in) ? expires_in : 3600});
+}
+async function route(request, env, ctx) {
+  const url = new URL(request.url);
+  if (!url.pathname.startsWith(PREFIX+"/")) throw new HttpError(404,"Not found.");
+  const path = url.pathname.slice(PREFIX.length);
+  if (path === "/health" && request.method === "GET") return reply({ready:true,google:!!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),link:available(env)});
+  if (request.method === "POST" && (path === "/register" || path === "/login")) {
+    ctx.waitUntil(env.DB.batch([
+      env.DB.prepare("DELETE FROM auth_limits WHERE expires_at<=?").bind(now()),
+      env.DB.prepare("DELETE FROM google_attempts WHERE expires_at<=?").bind(now()),
+      env.DB.prepare("DELETE FROM sessions WHERE expires_at<=?").bind(now()),
+      env.DB.prepare("DELETE FROM link_attempts WHERE expires_at<=?").bind(now()),
+    ]).catch(()=>{}));
+    return credentials(request,env,path==="/register");
+  }
+  if (request.method==="POST" && path==="/google/start") return googleBegin(request,env);
+  if (request.method==="POST" && path==="/google/pickup") return googlePickup(request,env);
+  if (request.method==="GET" && path==="/google/callback") return googleCallback(url,env);
+  if (request.method==="GET" && path.startsWith("/avatar/")) return avatar(path.slice(8),env);
+  if (request.method==="GET" && path==="/link/callback") return linkCallback(url,env);
+  const {user,hash} = await authenticate(request,env);
+  if (path==="/links" && request.method==="GET") return reply(await linkList(env,user));
+  const linkRoute = path.match(/^\/link\/(google|spotify)(?:\/(start|token))?$/);
+  if (linkRoute) {
+    const [, provider, action] = linkRoute;
+    if (action==="start" && request.method==="POST") return linkStart(request,env,user,provider);
+    if (action==="token" && request.method==="POST") return linkToken(request,env,user,provider);
+    if (!action && request.method==="DELETE") {
+      await env.DB.prepare("DELETE FROM links WHERE user_id=? AND provider=?").bind(user.id,provider).run();
+      return reply(await linkList(env,user));
+    }
+  }
+  if (path==="/me" && request.method==="GET") return reply({account:publicUser(user,env.PUBLIC_BASE)});
+  if (path==="/me" && request.method==="PATCH") {
+    const body = await json(request);
+    const sets = [];
+    const values = [];
+    if ("display_name" in body) {
+      const name = str(body.display_name).trim();
+      if (!name || name.length>48 || /[\u0000-\u001f]/.test(name)) throw new HttpError(400,"Enter a display name up to 48 characters.");
+      sets.push("display_name=?"); values.push(name);
+    }
+    if ("bio" in body) {
+      const bio = str(body.bio).replace(/\s+/g," ").trim();
+      if (bio.length>160) throw new HttpError(400,"Keep your bio to 160 characters or fewer.");
+      sets.push("bio=?"); values.push(bio);
+    }
+    if (!sets.length) throw new HttpError(400,"Nothing to update.");
+    const updated = await env.DB.prepare("UPDATE users SET "+sets.join(",")+" WHERE id=? RETURNING *").bind(...values,user.id).first();
+    return reply({account:publicUser(updated,env.PUBLIC_BASE)});
+  }
+  if (path==="/me/avatar" && request.method==="PUT") {
+    await rate(env, request, "avatar", 20, user.id);
+    const type = (request.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    const data = await bytes(request, 150_000);
+    if (!data.length || !imageMatches(type, data)) throw new HttpError(400,"Use a JPEG, PNG or WebP image under 150 KB.");
+    const [, update] = await env.DB.batch([
+      env.DB.prepare("INSERT INTO avatars(user_id,content_type,data) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET content_type=excluded.content_type,data=excluded.data")
+        .bind(user.id,type,data.buffer),
+      env.DB.prepare("UPDATE users SET avatar_set=1,avatar_version=avatar_version+1 WHERE id=? RETURNING *").bind(user.id),
+    ]);
+    return reply({account:publicUser(update.results[0],env.PUBLIC_BASE)});
+  }
+  if (path==="/me/avatar" && request.method==="DELETE") {
+    const [, update] = await env.DB.batch([
+      env.DB.prepare("DELETE FROM avatars WHERE user_id=?").bind(user.id),
+      env.DB.prepare("UPDATE users SET avatar_set=0,avatar_version=avatar_version+1 WHERE id=? RETURNING *").bind(user.id),
+    ]);
+    return reply({account:publicUser(update.results[0],env.PUBLIC_BASE)});
+  }
+  if (path==="/logout" && request.method==="POST") {
+    await env.DB.prepare("DELETE FROM sessions WHERE token_hash=?").bind(hash).run();
+    return reply({ok:true});
+  }
+  if (path==="/music" && request.method==="GET") {
+    const row = await env.DB.prepare("SELECT * FROM music WHERE user_id=?").bind(user.id).first();
+    return reply(row ? {revision:row.revision,updated_at:row.updated_at,snapshot:JSON.parse(row.snapshot)} : {revision:0});
+  }
+  if (path==="/music" && request.method==="PUT") {
+    const body = await json(request,950_000);
+    if (!Number.isSafeInteger(body.revision) || body.revision<0) throw new HttpError(400,"Invalid library revision.");
+    const snapshot = JSON.stringify(musicSnapshot(body.snapshot));
+    const stamp = now();
+    const write = body.revision === 0
+      ? env.DB.prepare("INSERT OR IGNORE INTO music VALUES (?,1,?,?) RETURNING revision").bind(user.id,snapshot,stamp)
+      : env.DB.prepare("UPDATE music SET revision=revision+1,snapshot=?,updated_at=? WHERE user_id=? AND revision=? RETURNING revision").bind(snapshot,stamp,user.id,body.revision);
+    const row = await write.first();
+    if (!row) throw new HttpError(409,"The cloud library changed. Download it before uploading again.");
+    return reply({revision:row.revision,updated_at:stamp});
+  }
+  throw new HttpError(404,"Not found.");
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://developers.cloudflare.com/workers/wrangler/config-schema.json",
+  "name": "roynit-accounts",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-01-01",
+  "workers_dev": false,
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": { "PUBLIC_BASE": "https://roynit.dangz.org/api/account" },
+  "routes": [{ "pattern": "roynit.dangz.org/api/account/*", "zone_name": "dangz.org" }],
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "roynit-accounts",
+    "database_id": "0000e6ee-0fe3-4176-842e-78e102c67c19",
+    "migrations_dir": "migrations"
+  }]
+}

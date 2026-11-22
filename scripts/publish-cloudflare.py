@@ -17,8 +17,9 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     version = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
-    binary = root / "dist/riff-rust-windows-x64.exe"
+    binary = root / "dist" / f"Roy-Music-{version}-Setup.exe"
     digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    # The Setup carries its own digest file; riff-rust-windows-x64.exe.sha256 belongs to the plain app exe.
     manifest = (binary.parent / (binary.name + ".sha256")).read_text().split()[0]
     if manifest != digest:
         raise SystemExit("Installer checksum does not match the packaged manifest")
@@ -61,9 +62,10 @@ def main():
     run("r2", "object", "put", "roynit-library-releases/releases/" + release_id, "--remote", "--file", str(binary), "--content-type", "application/octet-stream")
     stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
     notes = (root / "CHANGELOG.md").read_text(encoding="utf-8")[:4000]
-    app_values = ["roynit-music", "Roynit Music", "Trình nghe nhạc Rust cho Windows. Tìm nhạc Spotify và YouTube Music. Bản xem trước của dang.", "Windows x64", stamp]
-    values = [release_id, "roynit-music", version, notes, "Roynit-Music-" + version + "-Setup.exe", size, digest, 0, rank, stamp, stamp]
+    app_values = ["roynit-music", "Roy Music", "Nghe nhạc đa nguồn, karaoke và đồng bộ thư viện với Roynit ID. Phát triển bởi dang.", "Windows x64", stamp]
+    values = [release_id, "roynit-music", version, notes, binary.name, size, digest, 0, rank, stamp, stamp]
     query("INSERT OR IGNORE INTO apps(slug,name,summary,platform,created_at) VALUES (" + ",".join(map(sql_literal, app_values)) + ");"
+          + "UPDATE apps SET name=" + sql_literal(app_values[1]) + ", summary=" + sql_literal(app_values[2]) + " WHERE slug='roynit-music';"
           + "INSERT INTO releases(id,app_slug,version,notes,filename,size,sha256,required,version_rank,created_at,published_at) SELECT "
           + ",".join(map(sql_literal, values)) + " WHERE NOT EXISTS (SELECT 1 FROM releases WHERE app_slug='roynit-music' AND published_at IS NOT NULL AND version_rank >= " + str(rank) + ");", write=True)
     published = query("SELECT sha256 FROM releases WHERE id=" + sql_literal(release_id) + " AND published_at IS NOT NULL")[0]["results"]

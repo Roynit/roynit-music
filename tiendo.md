@@ -1,3 +1,36 @@
+# Bàn giao Roy Music 0.1.4
+
+Mở cả thư mục D:/Roy-Music-source. Đây là bản sao của repo local mới nhất, có lịch sử Git và các thay đổi chưa commit. Nhánh ui-graphite-refresh, commit nền 0add715. Chạy git status --short trước khi sửa. Source app Rust và backend Worker Roynit ID nằm cùng repo. Tác giả phát hành là dang.
+
+## Trạng thái hiện tại
+
+- Bản Windows x64 0.1.4 đã phát hành: https://roynit.dangz.org/get/roynit-music/0.1.4
+- Bộ cài tự cài yt-dlp nếu thiếu và kiểm tra SHA-256. Đã thử cài sạch, chạy yt-dlp và đối chiếu file tải từ web. FFmpeg/FFprobe vẫn là công cụ ngoài cho các luồng cần dùng. Bộ cài chưa có chữ ký số.
+- UI Roy Music có tìm đa nguồn, kết quả nhanh và trang kết quả sau Enter, thư viện playlist, custom title bar, thanh phát đen, pane lyrics và Words/Line.
+- Roynit ID chạy ở https://roynit.dangz.org/api/account. Đã thử đăng ký bằng email/tên đăng nhập, hồ sơ, đồng bộ và đăng xuất. Google OAuth đã cấu hình và kiểm tra bước mở luồng; chưa xác nhận đăng nhập bằng tài khoản thật. Xác minh email và đặt lại mật khẩu chưa triển khai.
+- Đồng bộ nhạc là opt-in, dữ liệu đồng bộ được dùng cho mix sau khi nhập vào thư viện thiết bị. Xem accounts/README.md cho cấu hình và phạm vi dữ liệu.
+
+## Bộ cài và giao diện (đợt sau 0.1.4, chưa phát hành)
+
+- `roy-setup` (src/setup.rs) là bộ cài thật: cửa sổ egui riêng, kiểm máy (disk, audio, mạng, FFmpeg, yt-dlp), liệt kê cái thiếu rồi tải và cài, kèm hoạt ảnh. Logic kiểm/cài nằm trong `src/prerequisites.rs` và `src/tools.rs` (`install_ffmpeg_with`, BtbN LGPL shared, kiểm SHA-256, giải nén bằng tar.exe của Windows). Gói payload tự giải nén ở `src/payload.rs`; `scripts/package.ps1` gọi `roy-setup --pack` để tạo `Roy-Music-<ver>-Setup.exe` và file `.sha256` riêng.
+- Setup tự đăng ký Settings → Apps (HKCU, `uninstall.exe` là chính bộ cài bỏ payload), tạo shortcut Start menu và desktop. `--silent --log f`, `--yes`, `--uninstall`, `--test-root <thư_mục>` (không đụng cài đặt thật, dùng khi thử). Chế độ cập nhật từ app: `--install --wait-pid N --launch`.
+- `.cargo/config.toml` bật crt-static, nên app và Setup không cần VC++ Redistributable.
+- `scripts/publish-cloudflare.py` giờ kiểm `Roy-Music-<ver>-Setup.exe.sha256`; bản tải về và bản cập nhật trong app đều là Setup.
+- UI: bảng nổi bo góc trên nền đen, chữ đậm thật (Segoe UI Bold), màu nhấn xanh Spotify (`DEFAULT_ACCENT`), lời chào + quick picks, thẻ có Play hiện khi rê chuột, thanh tua/âm lượng mỏng, hoạt ảnh nhẹ (tắt khi Reduce motion). Biến môi trường `ROYNIT_START_PAGE` mở thẳng một trang khi kiểm giao diện.
+
+## Điểm bắt đầu
+
+- cargo run --locked --features desktop --bin riff-desktop để chạy local.
+- cargo fmt --check và cargo clippy --locked --features desktop --all-targets -- -D warnings để kiểm tra.
+- scripts/package.ps1 đóng gói Windows. scripts/publish-cloudflare.py xuất bản phiên bản mới qua Wrangler đã xác thực; xem docs/CLOUDFLARE.md. 0.1.4 đã phát hành, tăng version cho lần phát hành tiếp theo.
+- src/desktop.rs chứa UI, src/lyrics.rs xử lý timing, src/tools.rs quản lý yt-dlp, src/roy_account_ui.rs chứa giao diện tài khoản, src/account_music.rs xử lý dữ liệu sync. Backend và migration nằm trong accounts/.
+- Dữ liệu người dùng, bản build, token và cache Wrangler nằm ngoài bản sao này. Google OAuth secrets được quản lý trong Cloudflare Worker, chỉ kiểm tra trạng thái qua health endpoint.
+- Riff Electron gốc là repo tham khảo riêng. Giữ giấy phép và third-party notices đang có.
+
+## Ghi chú lịch sử
+
+Phần dưới đây giữ lại bàn giao cũ của bản 0.1.2 để tham khảo. Dùng mục 0.1.4 ở trên cho phiên bản và đường dẫn hiện tại.
+
 # Bàn giao Roynit Music
 
 ## Bắt đầu ở đây

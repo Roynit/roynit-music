@@ -223,6 +223,26 @@ impl OAuth {
         self.tokens.insert(provider.into(), token);
         Ok(self.status(provider))
     }
+    /// Accept an access token minted for this user by Roynit ID, which holds the provider's refresh token.
+    /// No client config is kept, so `refresh` is refused here and the app asks Roynit ID for a new token instead.
+    pub fn adopt(&mut self, provider: &str, access_token: &str, expires_in: u64) -> Result<Value> {
+        ensure!(["google", "spotify"].contains(&provider), "Unsupported OAuth provider");
+        ensure!(
+            !access_token.is_empty() && access_token.len() < 4096,
+            "Missing access token"
+        );
+        self.configs.remove(provider);
+        self.pending.remove(provider);
+        self.expires.insert(
+            provider.into(),
+            Instant::now() + Duration::from_secs(expires_in.clamp(60, 86400)),
+        );
+        self.tokens.insert(
+            provider.into(),
+            json!({"access_token":access_token,"token_type":"Bearer"}),
+        );
+        Ok(self.status(provider))
+    }
     pub fn logout(&mut self, provider: &str) {
         self.tokens.remove(provider);
         self.pending.remove(provider);

@@ -24,7 +24,7 @@ impl Session {
         };
         let mut controls = MediaControls::new(PlatformConfig {
             dbus_name: "riff",
-            display_name: "Roynit Music",
+            display_name: "Roy Music",
             hwnd,
         })
         .map_err(|e| format!("{e:?}"))?;

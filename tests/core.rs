@@ -197,3 +197,35 @@ fn oauth_verifies_state_and_loopback_callback_without_network() {
     );
     assert!(e.dispatch(&json!({"command":"oauth.finish","params":{"provider":"google","state":"wrong","code":"x"}})).unwrap_err().to_string().contains("state mismatch"));
 }
+
+#[test]
+fn karaoke_estimates_words_between_lines() {
+    let lines = lyrics::parse("[00:05.00]Go now, please\n[00:08.00]Next line");
+    let words = lyrics::estimate_word_timings(&lines[0], lines.get(1), 20.);
+    assert_eq!(
+        words
+            .iter()
+            .map(|word| word.text.as_str())
+            .collect::<Vec<_>>(),
+        ["Go", "now,", "please"]
+    );
+    assert_eq!(words[0].time, 5.);
+    assert!(
+        words
+            .windows(2)
+            .all(|pair| pair[0].end == Some(pair[1].time))
+    );
+    assert!(words[2].end.unwrap() < 8.);
+    let cjk = lyrics::parse("[00:01.00]日本語");
+    assert_eq!(lyrics::estimate_word_timings(&cjk[0], None, 5.).len(), 3);
+}
+
+#[test]
+fn karaoke_merges_matching_words_but_rejects_other_recordings() {
+    let mut lines = lyrics::parse("[00:05.00]Go now\n[00:20.00]Go now");
+    let timed = lyrics::parse_yrc("[5200,1200](5200,600,0)Go (5800,600,0)now");
+    lyrics::merge_word_timings(&mut lines, &timed);
+    assert_eq!(lines[0].words.len(), 2);
+    assert!((lines[0].words[0].time - 5.).abs() < 0.001);
+    assert!(lines[1].words.is_empty());
+}

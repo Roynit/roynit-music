@@ -1,1 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#7050c5"/><path d="M19 49V15h16q14 0 14 12 0 9-9 11l10 11H39L28 36v13zm9-21h7q5 0 5-4t-5-4h-7z" fill="white" fill-rule="evenodd"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Roy Music</title>
+  <path d="M20 30H158C191 30 219 55 219 88C219 116 201 140 168 147L233 222H178L75 107H158C168 107 176 99 176 89C176 78 168 71 158 71H59Z" fill="#24242b" stroke="#a9a8b2" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M48 124L119 202H48Z" fill="#3e315f" stroke="#9a85c1" stroke-width="3" stroke-linejoin="round"/>
+</svg>

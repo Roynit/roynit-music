@@ -12,7 +12,7 @@ use std::{
 #[derive(Parser)]
 #[command(
     version,
-    about = "Roynit Music headless engine. One JSON request per line; EOF exits."
+    about = "Roy Music headless engine. One JSON request per line; EOF exits."
 )]
 struct Args {
     #[arg(long)]

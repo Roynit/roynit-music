@@ -11,22 +11,22 @@ pub const MUSIC_ORIGIN: &str = "https://roynit.dangz.org";
 pub fn music_release_info(value: &Value, current: &str) -> Result<Value> {
     let tag = value["version"]
         .as_str()
-        .context("Missing Roynit Music version")?;
+        .context("Missing Roy Music version")?;
     let parsed = version(tag)?;
     let download = format!("{MUSIC_ORIGIN}/get/roynit-music/{tag}");
     let checksum = format!("{MUSIC_ORIGIN}/api/library/roynit-music/checksum/{tag}");
     let hash = value["sha256"]
         .as_str()
-        .context("Missing Roynit Music checksum")?;
+        .context("Missing Roy Music checksum")?;
     ensure!(
         hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
-        "Invalid Roynit Music checksum"
+        "Invalid Roy Music checksum"
     );
     ensure!(
         value["filename"]
             .as_str()
             .is_some_and(|s| s.ends_with(".exe")),
-        "Roynit Music update must be an executable"
+        "Roy Music update must be an executable"
     );
     Ok(
         json!({"configured":true,"available":parsed>version(current)?,"version":tag,"current":current,"download":download,"checksum":checksum,"notes":value["notes"],"release_url":MUSIC_ORIGIN,"source":"Roynit Cloudflare"}),
@@ -98,7 +98,7 @@ pub fn check(client: &reqwest::blocking::Client, repo: Option<&str>) -> Result<V
             || response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE
         {
             return Ok(
-                json!({"configured":true,"available":false,"reason":"Roynit Music has no published release yet."}),
+                json!({"configured":true,"available":false,"reason":"Roy Music has no published release yet."}),
             );
         }
         return music_release_info(

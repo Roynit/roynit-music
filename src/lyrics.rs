@@ -171,6 +171,120 @@ pub fn words_online(
     ensure!(!lines.is_empty(), "Word timing is empty");
     Ok(json!({"source":"netease","lines":lines}))
 }
+/// Attach provider word timings to matching lines of the selected transcription.
+pub fn merge_word_timings(lines: &mut [Line], timed: &[Line]) {
+    use std::collections::HashMap;
+    let key = |text: &str| -> String {
+        text.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let mut by_text: HashMap<_, Vec<_>> = HashMap::new();
+    for line in timed.iter().filter(|line| !line.words.is_empty()) {
+        by_text.entry(key(&line.text)).or_default().push(line);
+    }
+    for line in lines.iter_mut().filter(|line| line.words.is_empty()) {
+        let Some(candidates) = by_text.get(&key(&line.text)) else {
+            continue;
+        };
+        let Some(best) = candidates
+            .iter()
+            .copied()
+            .min_by(|a, b| {
+                (a.time - line.time)
+                    .abs()
+                    .total_cmp(&(b.time - line.time).abs())
+            })
+            .filter(|candidate| (candidate.time - line.time).abs() <= 2.5)
+        else {
+            continue;
+        };
+        let mut remaining = line.text.as_str();
+        if !best.words.iter().all(|word| {
+            let text = word.text.trim();
+            if let Some(index) = remaining.find(text) {
+                remaining = &remaining[index + text.len()..];
+                true
+            } else {
+                false
+            }
+        }) {
+            continue;
+        }
+        let shift = line.time - best.time;
+        line.words = best
+            .words
+            .iter()
+            .cloned()
+            .map(|mut word| {
+                word.time = (word.time + shift).max(line.time);
+                word.end = word.end.map(|end| (end + shift).max(word.time));
+                word
+            })
+            .collect();
+    }
+}
+
+pub fn estimate_word_timings(line: &Line, next: Option<&Line>, duration: f64) -> Vec<Word> {
+    static TOKEN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"[\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}]\p{M}*|[^\s\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}]+").unwrap()
+    });
+    let tokens: Vec<_> = TOKEN
+        .find_iter(&line.text)
+        .map(|token| token.as_str())
+        .collect();
+    let weights: Vec<_> = tokens
+        .iter()
+        .enumerate()
+        .map(|(i, token)| {
+            let count = token.chars().filter(|c| c.is_alphanumeric()).count() as f64;
+            let pause = if token.contains(['.', '!', '?', '。', '！', '？', '…']) {
+                3.2
+            } else if token.contains(['-', '–', '—']) {
+                2.8
+            } else if token.contains([',', ';', ':', '、', '，', '；']) {
+                2.0
+            } else {
+                0.
+            };
+            (count * 0.55).max(1.4) + pause + if i + 1 == tokens.len() { 1.2 } else { 0. }
+        })
+        .collect();
+    let raw = next
+        .map(|next| next.time - line.time)
+        .unwrap_or_else(|| {
+            if duration > line.time {
+                (duration - line.time).min(5.)
+            } else {
+                3.
+            }
+        })
+        .max(0.45);
+    let breath = if raw > 2.2 {
+        (raw * 0.03).min(0.12)
+    } else {
+        0.
+    };
+    let span = (raw - breath).max(0.4);
+    let total: f64 = weights.iter().sum();
+    let mut time = line.time;
+    tokens
+        .into_iter()
+        .zip(weights)
+        .map(|(text, weight)| {
+            let end = time + span * weight / total;
+            let word = Word {
+                time,
+                text: text.to_owned(),
+                end: Some(end),
+            };
+            time = end;
+            word
+        })
+        .collect()
+}
+
 pub fn active(lines: &[Line], position: f64, offset: f64) -> Option<usize> {
     let count = lines.partition_point(|line| line.time <= position + offset);
     count.checked_sub(1)
@@ -216,17 +330,32 @@ pub fn fetch_source(
     }
     ensure!(online, "No cached lyrics; online lookup disabled");
     let sources: Vec<_> = if source == "auto" {
-        vec!["lrclib", "netease", "kugou", "musixmatch", "genius"]
+        vec!["lrclib", "genius", "musixmatch", "kugou", "netease"]
     } else {
         vec![source]
     };
-    for source in sources {
+    let mut plain = None;
+    for provider in sources {
         crate::jobs::check_cancelled()?;
-        if let Ok(value) = crate::lyric_providers::fetch(client, source, title, artist, duration) {
+        if let Ok(value) = crate::lyric_providers::fetch(client, provider, title, artist, duration)
+        {
             crate::jobs::check_cancelled()?;
-            store::write_json(&path, &value)?;
-            return Ok(value);
+            let preferred = source != "auto"
+                || provider == "genius"
+                || value["instrumental"] == true
+                || value["lines"]
+                    .as_array()
+                    .is_some_and(|lines| !lines.is_empty());
+            if preferred {
+                store::write_json(&path, &value)?;
+                return Ok(value);
+            }
+            plain.get_or_insert(value);
         }
+    }
+    if let Some(value) = plain {
+        store::write_json(&path, &value)?;
+        return Ok(value);
     }
     anyhow::bail!("No matching lyrics available from the requested providers")
 }

@@ -40,6 +40,14 @@ fn appearance_applies_validated_native_theme_and_rejects_invalid_tokens() {
         e.store.data.settings["appearance"]["accent"],
         json!([18, 52, 171])
     );
+    for legacy in ["off", "bars"] {
+        let migrated = Appearance::from_tokens(json!({"visualizer": legacy})).unwrap();
+        assert_eq!(migrated.visualizer, "waveform");
+    }
+    assert_eq!(
+        Appearance::from_tokens(json!({"visualizer": "hidden"})).unwrap().visualizer,
+        "hidden"
+    );
     assert!(Appearance::from_tokens(json!({"accent":"#nope"})).is_err());
     assert!(Appearance::from_tokens(json!({"font_size":100})).is_err());
 }

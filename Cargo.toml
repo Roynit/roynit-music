@@ -1,11 +1,11 @@
 [package]
 name = "riff-core"
-version = "0.1.2"
+version = "0.1.4"
 edition = "2024"
 license = "MIT"
 authors = ["dang"]
 repository = "https://github.com/Roynit/roynit-music"
-description = "Roynit Music native Rust music player"
+description = "Roy Music native Rust music player"
 
 [lib]
 name = "riff_core"
@@ -19,6 +19,11 @@ name = "riff-desktop"
 path = "src/desktop.rs"
 required-features = ["desktop"]
 
+[[bin]]
+name = "roy-setup"
+path = "src/setup.rs"
+required-features = ["desktop"]
+
 [[example]]
 name = "chromium_audit"
 required-features = ["chromium-audit"]
@@ -26,9 +31,10 @@ required-features = ["chromium-audit"]
 [features]
 chromium-audit = ["dep:webview2-com", "dep:windows"]
 default = []
-desktop = ["dep:eframe", "dep:egui_extras", "dep:image", "dep:rfd", "dep:open", "dep:tray-icon", "dep:souvlaki", "dep:raw-window-handle"]
+desktop = ["dep:eframe", "dep:egui_extras", "dep:image", "dep:rfd", "dep:open", "dep:tray-icon", "dep:souvlaki", "dep:raw-window-handle", "dep:unicode-segmentation"]
 
 [dependencies]
+unicode-segmentation = { version = "1.13.3", optional = true }
 anyhow = "1"
 aes-gcm = "0.10"
 base64 = "0.22"

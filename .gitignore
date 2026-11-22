@@ -8,3 +8,6 @@
 *.dpapi
 .env
 .env.*
+
+/accounts/.wrangler/
+/accounts/.dev.vars*

@@ -1,3 +1,4 @@
+pub mod account_music;
 pub mod appearance;
 pub mod cache;
 pub mod catalog;
@@ -17,8 +18,10 @@ pub mod mixes;
 pub mod model;
 pub mod network;
 pub mod oauth;
+pub mod payload;
 pub mod player;
 pub mod plugins;
+pub mod prerequisites;
 mod process_guard;
 pub mod provider;
 mod search_cache;
@@ -1100,13 +1103,11 @@ impl Engine {
                 "lyrics.words"=>lyrics::words_online(&client,text(&params,"title")?,text(&params,"artist")?,params["duration"].as_f64().unwrap_or(0.)),
                 "catalog.metadata"=>catalog::metadata_with_proxy(&client,text(&params,"url")?,spotify_token.as_deref(),providers.proxy.as_deref()),
                 "catalog.import"=>{let source=text(&params,"url")?;let metadata=catalog::metadata_with_proxy(&client,source,spotify_token.as_deref(),providers.proxy.as_deref())?;catalog::import_plan(&metadata,source,boolean(&params,"allow_partial",false))},
-                "tools.install" => {
-                    ensure!(
-                        text(&params, "name")? == "yt-dlp",
-                        "Managed installation supports yt-dlp only"
-                    );
-                    tools::install_ytdlp(&client)
-                }
+                "tools.install" => match text(&params, "name")? {
+                    "yt-dlp" => tools::install_ytdlp(&client),
+                    "ffmpeg" => tools::install_ffmpeg(&client),
+                    _ => anyhow::bail!("Managed installation supports yt-dlp and ffmpeg"),
+                },
                 _ => unreachable!(),
             })
     }
@@ -1360,6 +1361,7 @@ impl Engine {
             "cookies.set",
             "cookies.browser",
             "oauth.finish",
+            "oauth.adopt",
             "oauth.logout",
             "backup.import",
             "legacy.import",
@@ -1741,13 +1743,11 @@ impl Engine {
                 json!({"protocol_version":1,"ui":true,"runtime":"rust","external_tools":["ffmpeg","ffprobe","yt-dlp"],"commands":COMMANDS,"parity":"in_progress","unsupported":["legacy_js_plugins","css_rendering"],"distribution":{"installer":true,"update_staging":true,"release_repo_configured":self.store.data.settings.get("release_repo").and_then(Value::as_str).is_some_and(|s|!s.is_empty()),"signed":null,"signature_information":"See the release signing-status.json"},"requires_live_validation":["oauth_accounts","lastfm_account","discord_account","browser_cookie_extraction","release_end_to_end","regional_catalogs"]}),
             ),
             "tools.status" => Ok(tools::status()),
-            "tools.install" => {
-                ensure!(
-                    text(p, "name")? == "yt-dlp",
-                    "Managed installation currently supports yt-dlp; install FFmpeg with your OS package manager"
-                );
-                tools::install_ytdlp(&self.client)
-            }
+            "tools.install" => match text(p, "name")? {
+                "yt-dlp" => tools::install_ytdlp(&self.client),
+                "ffmpeg" => tools::install_ffmpeg(&self.client),
+                _ => anyhow::bail!("Managed installation supports yt-dlp and ffmpeg"),
+            },
             "lastfm" => services::lastfm(&self.client, p),
             "translate" => translation::fetch(&self.client, &self.store.root,p),
             "themes.list" => Ok(json!(extensions::themes(&self.store.root)?)),
@@ -2116,6 +2116,12 @@ impl Engine {
                 )
             }
             "settings.get" => Ok(json!(self.store.data.settings)),
+            "account.music.merge" => {
+                let incoming: account_music::Snapshot = serde_json::from_value(p["snapshot"].clone())?;
+                incoming.merge_into(&mut self.store.data);
+                self.store.save()?;
+                Ok(json!(true))
+            }
             "settings.set" => {
                 let values = p.as_object().context("Settings must be an object")?;
                 for (k, v) in values {
@@ -2146,6 +2152,18 @@ impl Engine {
                     text(p, "provider")?,
                     text(p, "state")?,
                     text(p, "code")?,
+                )?;
+                vault::save(
+                    &self.store.root.join("oauth.dpapi"),
+                    &self.oauth.private_session(),
+                )?;
+                Ok(value)
+            }
+            "oauth.adopt" => {
+                let value = self.oauth.adopt(
+                    text(p, "provider")?,
+                    text(p, "access_token")?,
+                    p["expires_in"].as_u64().unwrap_or(3600),
                 )?;
                 vault::save(
                     &self.store.root.join("oauth.dpapi"),
@@ -2339,6 +2357,7 @@ pub const COMMANDS: &[&str] = &[
     "cache.clear",
     "oauth.begin",
     "oauth.finish",
+    "oauth.adopt",
     "oauth.status",
     "oauth.logout",
     "google.library",

@@ -6,9 +6,9 @@ Native Rust music player for Windows, developed by **dang**.
 
 ## Run
 
-Download the Windows installer from the Roynit library and run it with `--install --launch`, or use the Windows ZIP on GitHub: open `riff-desktop.exe` or `Install Roynit.cmd`. Installation uses your Windows user profile and creates a Start menu shortcut. The executable keeps its previous filename for compatibility with installed Rust versions. The interface is a working preview; Audio Studio is intentionally absent.
+Download `Roy-Music-<version>-Setup.exe` from the Roynit library and run it. Setup checks your PC, shows what is missing and installs it (FFmpeg and yt-dlp, with SHA-256 verification); no administrator rights or Visual C++ runtime are needed. It adds a Start menu shortcut, an optional desktop shortcut and an entry in Settings → Apps. The Windows ZIP on GitHub is a portable copy: open `riff-desktop.exe` or `Install Roy Music.cmd`. The executable keeps its previous filename for compatibility with installed Rust versions. The interface is a working preview; Audio Studio is intentionally absent.
 
-FFmpeg/FFprobe must be on PATH, or configured through RIFF_FFMPEG/RIFF_FFPROBE. yt-dlp can be installed from Settings with checksum verification. External media helpers are not bundled. No Electron or Node application runtime is required.
+FFmpeg/FFprobe are found on PATH, through RIFF_FFMPEG/RIFF_FFPROBE, or in Roy Music's own tools folder, where Setup (or Settings → Playback → Media engine) puts a verified copy. yt-dlp works the same way. Helpers are downloaded, never bundled. No Electron or Node application runtime is required.
 
 ## Features
 

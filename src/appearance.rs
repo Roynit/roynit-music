@@ -10,14 +10,18 @@ pub struct Appearance {
     pub reduced_motion: bool,
     pub visualizer: String,
 }
+/// Spotify-style green; the accent every fresh profile starts with.
+pub const DEFAULT_ACCENT: [u8; 3] = [30, 215, 96];
+/// Earlier builds saved these as the "default"; they should follow the new default.
+const LEGACY_ACCENTS: [[u8; 3]; 3] = [[224, 224, 224], [112, 80, 197], [170, 152, 255]];
 impl Default for Appearance {
     fn default() -> Self {
         Self {
             mode: "dark".into(),
-            accent: [170, 152, 255],
+            accent: DEFAULT_ACCENT,
             font_size: 15.,
             reduced_motion: false,
-            visualizer: "off".into(),
+            visualizer: "waveform".into(),
         }
     }
 }
@@ -32,7 +36,7 @@ impl Appearance {
             "Font size must be 12..24"
         );
         ensure!(
-            ["off", "bars", "waveform"].contains(&self.visualizer.as_str()),
+            ["waveform", "hidden"].contains(&self.visualizer.as_str()),
             "Unknown visualizer"
         );
         Ok(())
@@ -51,7 +55,14 @@ impl Appearance {
                 u8::from_str_radix(&color[4..6], 16)?
             ]);
         }
-        let appearance: Self = serde_json::from_value(value)?;
+        let mut appearance: Self = serde_json::from_value(value)?;
+        // "off" was the old default and "bars" is gone: both now mean the wave. "hidden" is the explicit opt-out.
+        if ["off", "bars"].contains(&appearance.visualizer.as_str()) {
+            appearance.visualizer = "waveform".into();
+        }
+        if LEGACY_ACCENTS.contains(&appearance.accent) {
+            appearance.accent = DEFAULT_ACCENT;
+        }
         appearance.validate()?;
         Ok(appearance)
     }

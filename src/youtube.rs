@@ -401,7 +401,17 @@ pub fn parse_tracks(value: &Value) -> Vec<Track> {
             }
         }
         let artist = if artist.is_empty() {
-            text(&byline).split(" • ").next().unwrap_or("").to_string()
+            let byline = text(&byline);
+            byline
+                .split(" • ")
+                .map(str::trim)
+                .find(|part| {
+                    !part.is_empty()
+                        && !["Song", "Video", "Music video"].contains(part)
+                        && duration(part) == 0.
+                })
+                .unwrap_or("")
+                .to_string()
         } else {
             artist.join(", ")
         };
@@ -465,7 +475,10 @@ pub fn parse_items(value: &Value) -> Vec<Value> {
     rows.into_iter().filter_map(|row|{let browse=row.get("navigationEndpoint").and_then(|n|n.get("browseEndpoint")).cloned().or_else(||first(&row["flexColumns"][0],"browseEndpoint"))?;let id=browse["browseId"].as_str()?;if !seen.insert(id.to_string()){return None;}
         let kind=if id.starts_with("UC"){"artist"}else if id.starts_with("MPRE"){"album"}else{"playlist"};
         let title=if row["title"].is_object(){text(&row["title"])}else{text(&row["flexColumns"][0]["musicResponsiveListItemFlexColumnRenderer"]["text"])};
-        Some(json!({"id":id,"kind":kind,"title":title,"subtitle":text(&row["subtitle"]),"params":browse["params"],"cover":first(&row,"thumbnails").and_then(|t|t.as_array()?.last()?["url"].as_str().map(str::to_string))}))
+        let subtitle = if row["subtitle"].is_object() { text(&row["subtitle"]) } else {
+            text(&row["flexColumns"][1]["musicResponsiveListItemFlexColumnRenderer"]["text"])
+        };
+        Some(json!({"id":id,"kind":kind,"title":title,"subtitle":subtitle,"params":browse["params"],"cover":first(&row,"thumbnails").and_then(|t|t.as_array()?.last()?["url"].as_str().map(str::to_string))}))
     }).collect()
 }
 fn is_generated_mix_id(id: &str) -> bool {
