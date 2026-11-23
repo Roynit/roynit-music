@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
     sync::{Mutex, OnceLock, mpsc},
     time::{Duration, Instant},
@@ -139,30 +139,45 @@ fn serve(mut stream: TcpStream) -> std::io::Result<()> {
     }
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(20))
+        .connect_timeout(Duration::from_secs(4))
+        .timeout(Duration::from_secs(8))
         .build()
         .map_err(|_| std::io::ErrorKind::Other)?;
-    // A small first chunk gets sound out quickly; later chunks are larger to keep the request count low.
-    let mut at = start;
-    let mut size = 256 * 1024;
-    while at <= end {
-        let to = (at + size - 1).min(end);
-        let response = client
-            .get(&url)
-            .header("User-Agent", &agent)
-            .header("Range", format!("bytes={at}-{to}"))
-            .send()
-            .map_err(|_| std::io::ErrorKind::ConnectionAborted)?;
-        if response.status().as_u16() != 206 {
-            return Err(std::io::ErrorKind::ConnectionAborted.into());
+    // The network side runs ahead of FFmpeg on its own thread (up to four chunks queued), so a slow or
+    // stalled request is retried and absorbed here instead of freezing the sound. A small first chunk
+    // gets sound out quickly; later chunks are larger to keep the request count low.
+    let (queue, chunks) = std::sync::mpsc::sync_channel::<Vec<u8>>(4);
+    std::thread::spawn(move || {
+        let (mut at, mut size) = (start, 256 * 1024);
+        while at <= end {
+            let to = (at + size - 1).min(end);
+            let mut data = None;
+            for attempt in 0..3u64 {
+                data = client
+                    .get(&url)
+                    .header("User-Agent", &agent)
+                    .header("Range", format!("bytes={at}-{to}"))
+                    .send()
+                    .ok()
+                    .filter(|response| response.status().as_u16() == 206)
+                    .and_then(|response| response.bytes().ok())
+                    .filter(|bytes| !bytes.is_empty());
+                if data.is_some() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(250 * (attempt + 1)));
+            }
+            let Some(data) = data else { break };
+            at += data.len() as u64;
+            size = 1024 * 1024;
+            // FFmpeg hung up (a seek or a skip): stop fetching.
+            if queue.send(data.to_vec()).is_err() {
+                break;
+            }
         }
-        let mut body = response.take(to - at + 1);
-        let copied = std::io::copy(&mut body, &mut stream)?;
-        if copied == 0 {
-            break;
-        }
-        at += copied;
-        size = 1024 * 1024;
+    });
+    for chunk in chunks {
+        stream.write_all(&chunk)?;
     }
     Ok(())
 }

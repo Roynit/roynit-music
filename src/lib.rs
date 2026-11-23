@@ -1343,6 +1343,16 @@ impl Engine {
             duration,
             self.store.data.effects.clone(),
         )?;
+        // The next songs in the queue get their stream links ready now, so skipping ahead starts at once.
+        if let Some(at) = self.store.data.queue.tracks.iter().position(|queued| queued == id) {
+            let upcoming: Vec<String> = self.store.data.queue.tracks[at + 1..]
+                .iter()
+                .take(2)
+                .filter_map(|next| self.store.data.tracks.get(next))
+                .map(|track| track.source.clone())
+                .collect();
+            youtube_stream::warm(upcoming);
+        }
         self.player.playback_source = provenance;
         self.track_revision = self.track_revision.wrapping_add(1);
         if record_history {

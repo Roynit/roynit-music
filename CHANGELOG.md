@@ -1,3 +1,8 @@
+# Roy Music 0.1.9
+
+- Fewer freezes while playing, and no long wait to resume: about twenty seconds of decoded sound is now kept ahead of the speakers (it was under a tenth of a second), the network side reads ahead on its own thread and retries a failed or slow request, and a stalled connection is given up after 8 seconds instead of 20.
+- The next songs in your queue get their stream links ready while the current one plays, so Next starts at once.
+
 # Roy Music 0.1.8
 
 - Mixes for you now builds playlists from your taste, the way YouTube does: "Made for you", "On repeat" (what you play and love most), "Discover" (new artists near your taste) and "Because you liked ..." mixes built around songs you hearted. A heart counts far more than a play. Mixes hold up to 40 songs.

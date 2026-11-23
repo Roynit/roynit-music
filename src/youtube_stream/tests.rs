@@ -4,13 +4,24 @@ use std::net::TcpListener;
 
 /// A stand-in for googlevideo: bounded ranges are served, a whole-file request is refused with 403.
 fn fake_upstream(body: Vec<u8>) -> u16 {
+    fake_upstream_with(body, 0)
+}
+
+/// `failures` is how many leading requests are answered with a 503 before the server behaves.
+fn fake_upstream_with(body: Vec<u8>, failures: usize) -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let body = body.clone();
+            let seen = seen.clone();
             std::thread::spawn(move || {
                 let mut stream = stream;
+                if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < failures {
+                    let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    return;
+                }
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut range = String::new();
                 loop {
@@ -72,4 +83,17 @@ fn relay_serves_whole_file_requests_as_bounded_ranges() {
     // Unknown paths and out-of-range requests are refused rather than forwarded.
     assert!(get(port, "/nope", "0-").0.starts_with("HTTP/1.1 404"));
     assert!(get(port, &path, "9999999-").0.starts_with("HTTP/1.1 416"));
+}
+
+#[test]
+fn relay_retries_a_failed_chunk_so_ffmpeg_never_sees_a_gap() {
+    let body: Vec<u8> = (0..700_000u32).map(|i| (i % 241) as u8).collect();
+    // The first two requests to the "server" fail; the relay must retry, not hand FFmpeg a short file.
+    let upstream = fake_upstream_with(body.clone(), 2);
+    let url = format!("http://127.0.0.1:{upstream}/v?clen={}", body.len());
+    let local = relay(&url, "test-agent").expect("relay address");
+    let parsed = url::Url::parse(&local).unwrap();
+    let (head, data) = get(parsed.port().unwrap(), parsed.path(), "0-");
+    assert!(head.starts_with("HTTP/1.1 206"), "{head}");
+    assert!(data == body, "got {} of {} bytes", data.len(), body.len());
 }

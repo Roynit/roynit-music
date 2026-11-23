@@ -106,7 +106,7 @@ fn open_decoder(
         }
         command.args([
             "-rw_timeout",
-            "20000000",
+            "8000000",
             "-reconnect",
             "1",
             "-reconnect_streamed",
@@ -166,7 +166,9 @@ fn open_decoder(
         }
         String::from_utf8_lossy(&retained).into_owned()
     });
-    let (sender, receiver) = mpsc::sync_channel(8);
+    // About twenty seconds of decoded sound (2048 blocks of 4 KiB = 8 MiB) is kept ahead of the speakers. The
+    // old eight blocks held under a tenth of a second, so any network or scheduling hiccup became a freeze.
+    let (sender, receiver) = mpsc::sync_channel(2048);
     let decoder_child = child.clone();
     let decoder_error = error.clone();
     std::thread::spawn(move || {
