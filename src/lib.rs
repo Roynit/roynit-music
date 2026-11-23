@@ -115,9 +115,18 @@ struct RadioSession {
     fetching: bool,
     retry_at: std::time::Instant,
 }
+/// The Discord application whose name and icon ("Roy Music") show in the Listening card.
+pub const DISCORD_APP_ID: &str = "1574391018894131230";
+/// The earlier application, named "Riff"; settings that still point at it are moved to the new one.
+const OLD_DISCORD_APP_ID: &str = "1520100510877749358";
 impl Engine {
     pub fn open(root: PathBuf) -> Result<Self> {
         let mut store = store::Store::open(root)?;
+        if let Some(discord) = store.data.settings.get_mut("discord")
+            && discord["application_id"] == OLD_DISCORD_APP_ID
+        {
+            discord["application_id"] = json!(DISCORD_APP_ID);
+        }
         store
             .data
             .settings

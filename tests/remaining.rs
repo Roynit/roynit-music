@@ -124,3 +124,14 @@ fn support_export_excludes_track_titles_paths_and_credentials() {
     assert_eq!(report["track_count"], 1);
     assert!(report["tools"]["ffmpeg"]["available"].is_boolean());
 }
+#[test]
+fn saved_discord_application_moves_off_the_old_riff_one() {
+    let root = tempfile::tempdir().unwrap();
+    {
+        let mut e = Engine::open(root.path().into()).unwrap();
+        e.dispatch(&json!({"command":"settings.set","params":{"discord":{"enabled":false,"application_id":"1520100510877749358"}}}))
+            .unwrap();
+    }
+    let e = Engine::open(root.path().into()).unwrap();
+    assert_eq!(e.store.data.settings["discord"]["application_id"], riff_core::DISCORD_APP_ID);
+}

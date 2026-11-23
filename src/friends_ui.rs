@@ -328,20 +328,125 @@ impl App {
         text.add(egui::Label::new(RichText::new(self.roy_account.name()).bold()).truncate().selectable(false));
         text.add(egui::Label::new(RichText::new(if hidden { "Invisible" } else { "Online" }).small().color(MUTED)).selectable(false));
         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Your status"));
-        egui::Popup::menu(&response).show(|ui| {
-            if ui.selectable_label(!hidden, "Online").clicked() {
-                self.social.set_invisible(false);
-                ui.close();
+        egui::Popup::menu(&response)
+            .align(egui::RectAlign::TOP_START)
+            .show(|ui| self.own_profile_popover(ui));
+    }
+
+    /// Discord-style profile that opens from your status card: cover, name, bio, what you are playing,
+    /// then Edit profile, your status and your Orbs.
+    fn own_profile_popover(&mut self, ui: &mut egui::Ui) {
+        ui.set_width(300.);
+        ui.spacing_mut().item_spacing.y = 4.;
+        let (banner, _) = ui.allocate_exact_size(egui::vec2(300., 84.), egui::Sense::hover());
+        let top = egui::CornerRadius { nw: 10, ne: 10, sw: 0, se: 0 };
+        let tint = roy_account_ui::tint_for(self.roy_account.name());
+        ui.painter().rect_filled(
+            banner,
+            top,
+            Color32::from_rgb(
+                (tint.r() as f32 * 1.35) as u8,
+                (tint.g() as f32 * 1.35) as u8,
+                (tint.b() as f32 * 1.35) as u8,
+            ),
+        );
+        if let Some(uri) = self.roy_account.banner_uri() {
+            Self::paint_cover(ui, banner, &uri, top);
+        }
+        let ring = ui.visuals().window_fill;
+        let art = egui::Rect::from_min_size(banner.left_bottom() + egui::vec2(14., -34.), egui::vec2(72., 72.));
+        ui.painter().circle_filled(art.center(), 40., ring);
+        roy_account_ui::paint_avatar(ui, &self.roy_account, art);
+        let hidden = self.social.invisible;
+        let dot = art.right_bottom() - egui::vec2(9., 9.);
+        ui.painter().circle_filled(dot, 10.5, ring);
+        ui.painter().circle_filled(dot, 7.5, if hidden { OFFLINE } else { GREEN });
+        ui.add_space(42.);
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 0)).show(ui, |ui| {
+            ui.set_width(272.);
+            ui.label(RichText::new(self.roy_account.name()).size(20.).bold());
+            ui.label(RichText::new(format!("@{}", self.roy_account.username())).color(MUTED));
+            let bio = self.roy_account.bio().to_owned();
+            if !bio.is_empty() {
+                ui.add_space(4.);
+                ui.add(egui::Label::new(RichText::new(bio)).wrap());
             }
-            if ui.selectable_label(hidden, "Invisible").clicked() {
-                self.social.set_invisible(true);
-                ui.close();
+            let playing = self.player["track_id"].as_str().and_then(|id| self.library.tracks.get(id)).cloned();
+            if let Some(track) = playing {
+                ui.add_space(8.);
+                let position = self.player["position"].as_f64().unwrap_or(0.);
+                let listening = Listening {
+                    title: track.title.clone(),
+                    artist: track.artist.clone(),
+                    cover: track.cover.clone(),
+                    duration: self.player["duration"].as_f64().filter(|d| *d > 0.).unwrap_or(track.duration),
+                    position,
+                    playing: self.player["paused"] == false,
+                    at: 0,
+                };
+                egui::Frame::new()
+                    .fill(Color32::from_white_alpha(10))
+                    .corner_radius(10)
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new("LISTENING TO").small().bold().color(MUTED));
+                        ui.add_space(6.);
+                        self.listen_card(ui, &listening, position);
+                    });
             }
-            ui.separator();
-            if ui.button("Edit profile").clicked() {
-                self.navigate(Page::Profile);
-                ui.close();
-            }
+            ui.add_space(8.);
+            egui::Frame::new()
+                .fill(Color32::from_white_alpha(10))
+                .corner_radius(10)
+                .inner_margin(egui::Margin::symmetric(4, 4))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 2.;
+                    let row = |ui: &mut egui::Ui, text: &str| {
+                        let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.), egui::Sense::click());
+                        if response.hovered() {
+                            ui.painter().rect_filled(rect, 8., Color32::from_white_alpha(14));
+                        }
+                        ui.painter().text(
+                            rect.left_center() + egui::vec2(10., 0.),
+                            egui::Align2::LEFT_CENTER,
+                            text,
+                            egui::FontId::proportional(15.),
+                            ui.visuals().text_color(),
+                        );
+                        response
+                    };
+                    if row(ui, "Edit profile").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        self.roy_account.start_editing();
+                        ui.close();
+                    }
+                    ui.horizontal(|ui| {
+                        ui.add_space(10.);
+                        ui.label("Status");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_space(6.);
+                            if ui.selectable_label(hidden, "Invisible").clicked() {
+                                self.social.set_invisible(true);
+                            }
+                            if ui.selectable_label(!hidden, "Online").clicked() {
+                                self.social.set_invisible(false);
+                            }
+                        });
+                    });
+                    let orbs = self.roy_account.orbs();
+                    let response = row(ui, &format!("      {orbs} Orbs"));
+                    // A small diamond stands in for the Orbs icon.
+                    let c = response.rect.left_center() + egui::vec2(20., 0.);
+                    let points = [(0., -7.), (7., 0.), (0., 7.), (-7., 0.)].map(|(x, y)| c + egui::vec2(x, y)).to_vec();
+                    ui.painter().add(egui::Shape::convex_polygon(
+                        points,
+                        Color32::from_rgb(0x4F, 0xD1, 0xC5).gamma_multiply(0.25),
+                        egui::Stroke::new(1.6_f32, Color32::from_rgb(0x4F, 0xD1, 0xC5)),
+                    ));
+                    response.on_hover_text("Orbs will be spent in the Roy Music shop, coming later");
+                });
+            ui.add_space(8.);
         });
     }
 
@@ -399,7 +504,7 @@ impl App {
                                         });
                                         ui.add_space(6.);
                                         if let Some(listening) = &friend.listening {
-                                            self.listen_card(ui, listening);
+                                            self.listen_card(ui, listening, self.social.position_of(listening));
                                         }
                                     })
                                     .response
@@ -415,8 +520,7 @@ impl App {
     }
 
     /// The song a friend is playing: cover, title, artist and a moving progress line.
-    fn listen_card(&self, ui: &mut egui::Ui, listening: &Listening) {
-        let position = self.social.position_of(listening);
+    fn listen_card(&self, ui: &mut egui::Ui, listening: &Listening, position: f64) {
         ui.horizontal(|ui| {
             self.artwork(ui, listening.cover.as_deref(), 52., 1.);
             ui.vertical(|ui| {
@@ -499,7 +603,7 @@ impl App {
                     ui.add_space(6.);
                     match &friend.listening {
                         Some(listening) => {
-                            self.listen_card(ui, listening);
+                            self.listen_card(ui, listening, self.social.position_of(listening));
                             ui.add_space(8.);
                             if ui.button("Find this song").clicked() {
                                 self.query = format!("{} {}", listening.title, listening.artist);
@@ -585,11 +689,23 @@ impl App {
     }
 
     fn friend_list(&mut self, ui: &mut egui::Ui) {
-        ui.add(
-            egui::TextEdit::singleline(&mut self.friend_filter)
-                .hint_text("Search friends")
-                .desired_width(ui.available_width().min(420.)),
-        );
+        egui::Frame::new()
+            .fill(ui.visuals().extreme_bg_color)
+            .stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(16)))
+            .corner_radius(22)
+            .inner_margin(egui::Margin::symmetric(14, 4))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width().min(420.));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("🔍").color(MUTED));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.friend_filter)
+                            .frame(false)
+                            .hint_text("Search friends")
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+            });
         ui.add_space(8.);
         let needle = self.friend_filter.trim().to_lowercase();
         let only_online = self.friends_tab == FriendsTab::Online;
@@ -613,8 +729,16 @@ impl App {
                 "No friends match your search."
             };
             ui.label(RichText::new(message).size(16.).color(MUTED));
-            if self.social.loaded && self.social.friends.is_empty() && ui.button("Add a friend").clicked() {
-                self.friends_tab = FriendsTab::Add;
+            if self.social.loaded && self.social.friends.is_empty() {
+                ui.add_space(6.);
+                let outline = egui::Button::new(RichText::new("Add a friend").bold())
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_gray(0x7C)))
+                    .corner_radius(18)
+                    .min_size(egui::vec2(130., 36.));
+                if ui.add(outline).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    self.friends_tab = FriendsTab::Add;
+                }
             }
             return;
         }
@@ -701,8 +825,8 @@ impl App {
         egui::Frame::new()
             .fill(ui.visuals().extreme_bg_color)
             .stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(20)))
-            .corner_radius(10)
-            .inner_margin(egui::Margin::symmetric(12, 6))
+            .corner_radius(26)
+            .inner_margin(egui::Margin { left: 18, right: 6, top: 6, bottom: 6 })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width().min(560.));
                 ui.horizontal(|ui| {
@@ -711,15 +835,26 @@ impl App {
                             .frame(false)
                             .hint_text("Enter a username")
                             .char_limit(25)
-                            .desired_width(ui.available_width() - 150.),
+                            .margin(egui::vec2(0., 10.))
+                            .desired_width(ui.available_width() - 160.),
                     );
                     submit |= field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let accent = ui.visuals().selection.bg_fill;
                         let on_accent = ui.visuals().selection.stroke.color;
                         let ready = !self.friend_input.trim().is_empty();
-                        let button = egui::Button::new(RichText::new("Send request").bold().color(on_accent)).fill(accent).corner_radius(8);
-                        submit |= ui.add_enabled(ready, button).clicked();
+                        // Grey and quiet until there is a name to send, then the accent colour.
+                        let (fill, ink) = if ready {
+                            (accent, on_accent)
+                        } else {
+                            (Color32::from_white_alpha(18), MUTED)
+                        };
+                        let button = egui::Button::new(RichText::new("Send request").bold().color(ink))
+                            .fill(fill)
+                            .corner_radius(20)
+                            .min_size(egui::vec2(130., 38.));
+                        let response = ui.add(button);
+                        submit |= ready && response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
                     });
                 });
             });

@@ -48,6 +48,10 @@ pub fn validate_repo(repo: &str) -> Result<()> {
     );
     Ok(())
 }
+/// Whether `candidate` is a newer stable version than `current` (anything unreadable is not newer).
+pub fn is_newer(candidate: &str, current: &str) -> bool {
+    matches!((version(candidate), version(current)), (Ok(a), Ok(b)) if a > b)
+}
 fn version(text: &str) -> Result<(u32, u32, u32)> {
     let parts: Vec<_> = text.trim_start_matches('v').split('.').collect();
     ensure!(parts.len() == 3, "Expected stable version x.y.z");
@@ -197,5 +201,20 @@ pub fn stage(client: &reqwest::blocking::Client, root: &Path, repo: Option<&str>
     )?;
     info["staged_path"] = json!(path);
     info["verified"] = json!(true);
+    info["sha256"] = json!(checksum.split_whitespace().next().unwrap_or("").to_lowercase());
     Ok(info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_newer;
+
+    #[test]
+    fn only_a_higher_stable_version_is_newer() {
+        assert!(is_newer("0.2.3", "0.2.2"));
+        assert!(is_newer("v1.0.0", "0.9.9"));
+        assert!(!is_newer("0.2.2", "0.2.2"));
+        assert!(!is_newer("0.2.1", "0.2.2"));
+        assert!(!is_newer("garbage", "0.2.2"));
+    }
 }

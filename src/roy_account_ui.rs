@@ -281,6 +281,23 @@ impl State {
         (&self.endpoint, token)
     }
 
+    pub(super) fn is_editing(&self) -> bool {
+        self.editing && !self.profile.is_null()
+    }
+
+    pub(super) fn bio(&self) -> &str {
+        self.profile["bio"].as_str().unwrap_or_default()
+    }
+
+    pub(super) fn orbs(&self) -> u64 {
+        self.profile["orbs"].as_u64().unwrap_or(0)
+    }
+
+    pub(super) fn start_editing(&mut self) {
+        self.sync_fields();
+        self.editing = true;
+    }
+
     pub(super) fn has_password(&self) -> bool {
         self.profile["has_password"] == true
     }
@@ -459,7 +476,7 @@ impl State {
     }
 
     /// Where this account's cover picture is served from, like the avatar's address.
-    fn banner_uri(&self) -> Option<String> {
+    pub(super) fn banner_uri(&self) -> Option<String> {
         let version = self.profile["banner_url"].as_str()?.rsplit_once("?v=")?.1.to_owned();
         version.bytes().all(|b| b.is_ascii_digit()).then_some(())?;
         Some(format!("{}/banner/{}?v={version}", self.endpoint, self.profile["id"].as_str()?))
@@ -1157,9 +1174,6 @@ impl App {
             };
             ui.add(egui::Label::new(RichText::new(&self.roy_account.status).color(color)).wrap());
         }
-        if self.roy_account.editing && !self.roy_account.profile.is_null() {
-            self.profile_dialog(ui.ctx());
-        }
     }
 
     /// Username (unique, checked as you type), password (set or change) and Google sign-in.
@@ -1292,7 +1306,8 @@ impl App {
         }
     }
 
-    fn profile_dialog(&mut self, ctx: &egui::Context) {
+    /// The "Profile details" dialog; it can open over any page.
+    pub(super) fn profile_dialog(&mut self, ctx: &egui::Context) {
         let account = &mut self.roy_account;
         let mut close = false;
         let mut open_security = false;

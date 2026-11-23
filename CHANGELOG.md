@@ -1,3 +1,10 @@
+# Roy Music 0.2.3
+
+- Updates install themselves: when a newer version exists, Roy Music downloads it quietly (checked with SHA-256) and installs it the next time you open the app. Turn it off in Settings → Data & updates → "Install updates automatically".
+- Click your card at the bottom of the Friends sidebar to open your profile like Discord does: cover, picture, name, @username, bio, what you are listening to, Edit profile, your status (Online or Invisible) and your Orbs, the currency for the shop that is coming later. Edit profile now opens over any page.
+- Discord now says "Listening to Roy Music" with the Roy Music icon (a new Discord application replaces the old "Riff" one, and saved settings are moved over automatically).
+- Smaller fixes to the friend search box and the Add friend button.
+
 # Roy Music 0.2.2
 
 - Passwords now need only 6 characters (it was 12), when you create an account and when you set or change one.

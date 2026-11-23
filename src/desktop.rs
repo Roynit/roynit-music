@@ -259,6 +259,8 @@ struct App {
     release_repo: String,
     update_info: Value,
     update_checked: bool,
+    update_staging: bool,
+    quit_for_update: bool,
     library_filter: String,
     library_sort: usize,
     rename_playlist: String,
@@ -503,7 +505,7 @@ impl App {
             login_thread: None,
             retry_login: false,
             login_generation: 0,
-            discord_id: "1520100510877749358".into(),
+            discord_id: riff_core::DISCORD_APP_ID.into(),
             devices: vec![],
             selected_device: String::new(),
             sleep_minutes: 30,
@@ -519,6 +521,8 @@ impl App {
             release_repo: String::new(),
             update_info: json!({}),
             update_checked: false,
+            update_staging: false,
+            quit_for_update: false,
             library_filter: String::new(),
             library_sort: 0,
             rename_playlist: String::new(),
@@ -748,6 +752,23 @@ impl App {
                 self.update_info = data;
                 if tag == "update" {
                     self.status = "Update check complete".into();
+                }
+                self.stage_update_quietly();
+            }
+            "update-auto" => {
+                self.update_staging = false;
+                if data["verified"] == true
+                    && let (Some(version), Some(path), Some(sha256)) = (
+                        data["version"].as_str(),
+                        data["staged_path"].as_str(),
+                        data["sha256"].as_str(),
+                    )
+                {
+                    self.send(
+                        "preferences",
+                        "settings.set",
+                        json!({"pending_update":{"version":version,"path":path,"sha256":sha256}}),
+                    );
                 }
             }
             "support" => {
@@ -1051,7 +1072,10 @@ impl App {
                     self.library = *data;
                     if !self.update_checked {
                         self.update_checked = true;
-                        if self.library.settings.get("auto_update_check") != Some(&json!(false)) {
+                        // A version downloaded during the last session is installed now, on this launch.
+                        if !self.apply_pending_update()
+                            && self.library.settings.get("auto_update_check") != Some(&json!(false))
+                        {
                             self.send("update-silent", "updates.check", json!({}));
                         }
                     }
@@ -1090,6 +1114,7 @@ impl App {
                     Err(error)
                         if tag == "warm"
                             || tag == "update-silent"
+                            || tag == "update-auto"
                             || tag == "cancel"
                             || self.current_tag(&tag) == Some("lyrics-words")
                             || self.current_tag(&tag).is_none() =>
@@ -1123,6 +1148,7 @@ impl App {
                                 self.mix_error = true;
                             } else if tag == "warm"
                                 || tag == "update-silent"
+                                || tag == "update-auto"
                                 || self.current_tag(&tag) == Some("lyrics-words")
                             {
                             } else if self.current_tag(&tag) == Some("lyrics") {
@@ -1524,6 +1550,63 @@ impl App {
             }
         }));
         self.send("oauth-authorize","oauth.begin",json!({"provider":provider,"config":{"client_id":self.oauth_client,"client_secret":if self.oauth_secret.is_empty(){None}else{Some(self.oauth_secret.clone())},"redirect_uri":"http://127.0.0.1:8751/callback"}}));
+    }
+    /// Downloads a newer version in the background so it can be installed the next time the app opens.
+    fn stage_update_quietly(&mut self) {
+        let settings = &self.library.settings;
+        if self.update_staging
+            || self.update_info["available"] != true
+            || settings.get("auto_update_install") == Some(&json!(false))
+        {
+            return;
+        }
+        let latest = self.update_info["version"].as_str().unwrap_or_default();
+        let waiting = settings.get("pending_update").and_then(|p| p["version"].as_str());
+        if waiting == Some(latest) {
+            return;
+        }
+        self.update_staging = true;
+        self.send("update-auto", "updates.stage", json!({}));
+    }
+    /// Starts the installer for an update downloaded last session, then closes. Returns whether it did.
+    fn apply_pending_update(&mut self) -> bool {
+        let Some(pending) = self.library.settings.get("pending_update").filter(|v| v.is_object()).cloned() else {
+            return false;
+        };
+        // Forget it first, so a failed install can never repeat on every launch.
+        self.send("preferences", "settings.set", json!({"pending_update":null}));
+        let (Some(version), Some(path), Some(sha256)) = (
+            pending["version"].as_str(),
+            pending["path"].as_str(),
+            pending["sha256"].as_str(),
+        ) else {
+            return false;
+        };
+        let path = std::path::PathBuf::from(path);
+        if !path.starts_with(self.data_root.join("updates")) {
+            return false;
+        }
+        if !riff_core::updates::is_newer(version, env!("CARGO_PKG_VERSION")) {
+            let _ = std::fs::remove_file(&path);
+            return false;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            return false;
+        };
+        use sha2::{Digest, Sha256};
+        if !bytes.starts_with(b"MZ") || !format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(sha256) {
+            return false;
+        }
+        let started = riff_core::tools::command(&path.to_string_lossy())
+            .args(["--install", "--wait-pid", &std::process::id().to_string(), "--launch", "--data-dir"])
+            .arg(&self.data_root)
+            .spawn();
+        if started.is_err() {
+            return false;
+        }
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.quit_for_update = true;
+        true
     }
     fn rows(&mut self, ui: &mut egui::Ui, mut tracks: Vec<Track>) {
         if matches!(self.page, Page::Library | Page::Favorites | Page::Offline) {
@@ -6126,6 +6209,19 @@ impl App {
                 }
             });
         }
+        let mut install = self.library.settings.get("auto_update_install") != Some(&json!(false));
+        Self::row(
+            ui,
+            q,
+            "Install updates automatically",
+            "Downloads a new version in the background and installs it the next time you open Roy Music",
+            "automatic update install",
+            |ui| {
+                if Self::toggle(ui, &mut install, "Install updates automatically").changed() {
+                    self.send("preferences", "settings.set", json!({"auto_update_install":install}));
+                }
+            },
+        );
         let mut automatic = self.library.settings.get("auto_update_check") != Some(&json!(false));
         Self::row(ui, q, "Check on start", "", "automatic update", |ui| {
             if Self::toggle(ui, &mut automatic, "Check for updates on start").changed() {
@@ -7479,6 +7575,9 @@ impl App {
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.quit_for_update {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         if ctx.input(|i| i.viewport().close_requested())
             && self.close_to_tray
             && !self.shutdown.load(Ordering::Relaxed)
@@ -7514,6 +7613,9 @@ impl eframe::App for App {
         }
         self.roynit_gate(ctx);
         self.security_dialog(ctx);
+        if self.roy_account.is_editing() {
+            self.profile_dialog(ctx);
+        }
         if !self.roy_account.needs_sign_in() {
             self.settings_dialog(ctx);
             self.import_dialog(ctx);

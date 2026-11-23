@@ -8,9 +8,9 @@ const now = () => Math.floor(Date.now() / 1000);
 const hex = (bytes) => Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
 const random = () => hex(crypto.getRandomValues(new Uint8Array(32)));
 const digest = async (text) => hex(await crypto.subtle.digest("SHA-256", encoder.encode(text)));
-const publicUser = ({id, email, username, display_name, google_subject, password, bio, avatar_set, avatar_version, banner_set, banner_version, created_at}, base) => ({
+const publicUser = ({id, email, username, display_name, google_subject, password, orbs, bio, avatar_set, avatar_version, banner_set, banner_version, created_at}, base) => ({
   id, email, username, display_name, provider: google_subject ? "google" : "password",
-  has_password: !!password, has_google: !!google_subject,
+  has_password: !!password, has_google: !!google_subject, orbs: orbs || 0,
   bio: bio || "", created_at,
   // The version in the URL changes with every upload, so browsers and the app can cache it forever.
   avatar_url: avatar_set ? base + "/avatar/" + id + "?v=" + avatar_version : null,

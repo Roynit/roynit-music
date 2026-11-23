@@ -233,6 +233,7 @@ test("username changes and passwords", async () => {
   const b = await request("/register", "POST", { email: "v_" + nonce + "@example.test", username: "v_" + nonce, password });
   assert.equal(a.account.has_password, true);
   assert.equal(a.account.has_google, false);
+  assert.equal(a.account.orbs, 0);
   // Six characters is the minimum for a password.
   await request("/register", "POST", { email: "w_" + nonce + "@example.test", username: "w_" + nonce, password: "12345" }, undefined, 400);
   await request("/register", "POST", { email: "w_" + nonce + "@example.test", username: "w_" + nonce, password: "123456" });
