@@ -1,3 +1,10 @@
+# Roy Music 0.2.6
+
+- Roy Music can start with Windows, on by default. It opens quietly in the tray, so no window pops up when you sign in. Turn it off in Settings → Playback → "Start with Windows" or in Task Manager → Startup apps; either way the switch in Settings follows.
+- Opening Roy Music while it is already running (for example from the shortcut after it started with Windows) brings the running window forward instead of failing or opening a second copy.
+- "Show Roy Music" in the tray menu now reliably brings the window back from the tray.
+- Updating removes the leftover "Riff Rust" shortcut from Start and the desktop.
+
 # Roy Music 0.2.5
 
 - Fixed lyrics that began with page clutter ("39 Contributors", a list of translations, a blurb ending in "Read More") on some songs. Lines are also joined correctly when a phrase is annotated, and lyrics saved with the clutter are fetched again.

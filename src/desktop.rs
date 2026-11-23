@@ -17,7 +17,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
@@ -116,6 +116,12 @@ fn worker(
     engine.player.stop();
     let _ = engine.store.save();
 }
+
+/// A window started quietly with Windows sits far off screen until it is first shown.
+static OFFSCREEN: AtomicBool = AtomicBool::new(false);
+/// The window's handle. A hidden window gets no frames, so asking egui to show it never happens; Windows is
+/// asked directly instead.
+static WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
@@ -260,6 +266,11 @@ struct App {
     update_info: Value,
     update_checked: bool,
     update_staging: bool,
+    background: bool,
+    quiet_frames: u8,
+    startup_supported: bool,
+    startup_state: Arc<AtomicU8>,
+    startup_checked: Instant,
     quit_for_update: bool,
     library_filter: String,
     library_sort: usize,
@@ -302,7 +313,7 @@ struct App {
     viz_peak: f32,
 }
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, root: PathBuf) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, root: PathBuf, background: bool) -> Self {
         let ctx = &cc.egui_ctx;
         egui_extras::install_image_loaders(ctx);
         let mut fonts = egui::FontDefinitions::default();
@@ -372,10 +383,7 @@ impl App {
             let quit = shutdown.clone();
             MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
                 match event.id.0.as_str() {
-                    "riff_show" => {
-                        context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        context.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    }
+                    "riff_show" => Self::reveal(&context),
                     "riff_quit" => {
                         quit.store(true, Ordering::Relaxed);
                         context.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -399,8 +407,7 @@ impl App {
             let context = ctx.clone();
             tray_icon::TrayIconEvent::set_event_handler(Some(move |event| {
                 if matches!(event, tray_icon::TrayIconEvent::DoubleClick { .. }) {
-                    context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    Self::reveal(&context);
                     context.request_repaint();
                 }
             }));
@@ -414,6 +421,28 @@ impl App {
                 .build()?)
         })()
         .ok();
+        #[cfg(windows)]
+        if let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(cc)
+            && let raw_window_handle::RawWindowHandle::Win32(window) = handle.as_raw()
+        {
+            WINDOW.store(window.hwnd.get(), Ordering::Relaxed);
+        }
+        // A second launch of the app wakes this window instead of opening another one.
+        {
+            let context = ctx.clone();
+            riff_core::instance::on_wake(&riff_core::instance::key_for(&data_root), move || {
+                Self::reveal(&context);
+                context.request_repaint();
+            });
+        }
+        // Started with Windows: stay in the tray; without a tray, wait minimized in the taskbar instead.
+        if background && tray.is_none() {
+            OFFSCREEN.store(false, Ordering::Relaxed);
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(20., 20.)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
+        let has_tray = tray.is_some();
         let media = system_media::Session::new(cc, tx.clone());
         let media_error = media.as_ref().err().cloned();
         let mut app = Self {
@@ -522,6 +551,11 @@ impl App {
             update_info: json!({}),
             update_checked: false,
             update_staging: false,
+            background,
+            quiet_frames: if background && has_tray { 6 } else { 0 },
+            startup_supported: riff_core::startup::is_installed_copy(),
+            startup_state: Arc::new(AtomicU8::new(0)),
+            startup_checked: Instant::now() - Duration::from_secs(10),
             quit_for_update: false,
             library_filter: String::new(),
             library_sort: 0,
@@ -1078,6 +1112,7 @@ impl App {
                         {
                             self.send("update-silent", "updates.check", json!({}));
                         }
+                        self.startup_defaults();
                     }
                 }
                 Message::Player(state) => {
@@ -1551,6 +1586,78 @@ impl App {
         }));
         self.send("oauth-authorize","oauth.begin",json!({"provider":provider,"config":{"client_id":self.oauth_client,"client_secret":if self.oauth_secret.is_empty(){None}else{Some(self.oauth_secret.clone())},"redirect_uri":"http://127.0.0.1:8751/callback"}}));
     }
+    /// Starting with Windows is on unless the person turned it off: set it up the first time only, and keep the
+    /// entry pointing at this copy of the program afterwards.
+    fn startup_defaults(&mut self) {
+        if !self.startup_supported {
+            return;
+        }
+        let first_time = !self.library.settings.contains_key("startup_initialized");
+        if first_time {
+            self.send("preferences", "settings.set", json!({"startup_initialized":true}));
+        }
+        let state = self.startup_state.clone();
+        std::thread::spawn(move || {
+            if let Ok(exe) = std::env::current_exe() {
+                if first_time {
+                    let _ = riff_core::startup::enable(&exe);
+                } else {
+                    riff_core::startup::repair(&exe);
+                }
+            }
+            state.store(Self::startup_code(riff_core::startup::status()), Ordering::Relaxed);
+        });
+    }
+    /// Brings the window back from the tray (or from a quiet start), where the person can see it.
+    fn reveal(context: &egui::Context) {
+        // A quiet start keeps the window far off screen so nothing flashes; it moves home the first time.
+        let moved_home = OFFSCREEN.swap(false, Ordering::Relaxed);
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                SW_RESTORE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow,
+            };
+            let window = WINDOW.load(Ordering::Relaxed) as *mut std::ffi::c_void;
+            if !window.is_null() {
+                // SAFETY: the handle belongs to this process's own window, which lives as long as the app.
+                unsafe {
+                    if moved_home {
+                        SetWindowPos(window, std::ptr::null_mut(), 20, 20, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    }
+                    ShowWindow(window, SW_RESTORE);
+                    SetForegroundWindow(window);
+                }
+            }
+        }
+        if moved_home {
+            context.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(20., 20.)));
+        }
+        context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        context.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+    /// 0 off, 1 on, 2 switched off in Task Manager.
+    fn startup_code(status: riff_core::startup::Status) -> u8 {
+        if status.enabled() {
+            1
+        } else if status.registered {
+            2
+        } else {
+            0
+        }
+    }
+    /// Reads the real state every couple of seconds while Settings is open, so a change made in Task Manager
+    /// shows up here.
+    fn refresh_startup_state(&mut self) {
+        if self.startup_checked.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.startup_checked = Instant::now();
+        let state = self.startup_state.clone();
+        std::thread::spawn(move || {
+            state.store(Self::startup_code(riff_core::startup::status()), Ordering::Relaxed);
+        });
+    }
     /// Downloads a newer version in the background so it can be installed the next time the app opens.
     fn stage_update_quietly(&mut self) {
         let settings = &self.library.settings;
@@ -1600,6 +1707,7 @@ impl App {
         let started = riff_core::tools::command(&path.to_string_lossy())
             .args(["--install", "--wait-pid", &std::process::id().to_string(), "--launch", "--data-dir"])
             .arg(&self.data_root)
+            .args(self.background.then_some("--startup"))
             .spawn();
         if started.is_err() {
             return false;
@@ -5461,6 +5569,33 @@ impl App {
                 }
             },
         );
+        if self.startup_supported {
+            self.refresh_startup_state();
+            let code = self.startup_state.load(Ordering::Relaxed);
+            let mut on = code == 1;
+            let hint = if code == 2 {
+                "Turned off in Task Manager. Turn it on here to start with Windows again"
+            } else {
+                "Opens quietly in the tray when you sign in to Windows"
+            };
+            Self::row(ui, q, "Start with Windows", hint, "startup boot login task manager autostart", |ui| {
+                if Self::toggle(ui, &mut on, "Start with Windows").changed() {
+                    let state = self.startup_state.clone();
+                    state.store(u8::from(on), Ordering::Relaxed);
+                    self.startup_checked = Instant::now();
+                    std::thread::spawn(move || {
+                        if on {
+                            if let Ok(exe) = std::env::current_exe() {
+                                let _ = riff_core::startup::enable(&exe);
+                            }
+                        } else {
+                            riff_core::startup::disable();
+                        }
+                        state.store(Self::startup_code(riff_core::startup::status()), Ordering::Relaxed);
+                    });
+                }
+            });
+        }
         if self._tray.is_some() {
             Self::row(
                 ui,
@@ -7575,6 +7710,11 @@ impl App {
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // eframe shows the window after its first frame; a quiet start hides it again straight away.
+        if self.quiet_frames > 0 {
+            self.quiet_frames -= 1;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
         if self.quit_for_update {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -7996,6 +8136,9 @@ fn main() -> eframe::Result {
                 {
                     launch.arg("--data-dir").arg(root);
                 }
+                if arguments.iter().any(|a| a == "--startup") {
+                    launch.arg("--startup");
+                }
                 let _ = launch.spawn()?;
             }
             Ok(())
@@ -8018,6 +8161,17 @@ fn main() -> eframe::Result {
         .map(PathBuf::from)
         .or_else(|| Engine::default_root().ok())
         .expect("Cannot find data directory");
+    // One copy per data folder: a second launch wakes the first and leaves quietly. When Windows started the
+    // app (`--startup`) there is nobody to show anything to, so it just leaves.
+    let background = arguments.iter().any(|a| a == "--startup");
+    OFFSCREEN.store(background, Ordering::Relaxed);
+    let instance_key = riff_core::instance::key_for(&root);
+    if riff_core::instance::claim(&instance_key) == riff_core::instance::Role::Second {
+        if !background {
+            riff_core::instance::wake_first(&instance_key);
+        }
+        return Ok(());
+    }
     let image = image::load_from_memory(include_bytes!("../assets/icon-app.png"))
         .expect("embedded Roy Music icon")
         .into_rgba8();
@@ -8032,14 +8186,15 @@ fn main() -> eframe::Result {
             .with_icon(icon)
             .with_inner_size([1120., 700.])
             .with_decorations(!cfg!(windows))
-            .with_position([20., 20.])
+            .with_visible(!background)
+            .with_position(if background { [-32_000., -32_000.] } else { [20., 20.] })
             .with_min_inner_size([1000., 600.]),
         ..Default::default()
     };
     eframe::run_native(
         "Roy Music",
         options,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, root)))),
+        Box::new(move |cc| Ok(Box::new(App::new(cc, root, background)))),
     )
 }
 

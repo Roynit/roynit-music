@@ -11,3 +11,12 @@
 
 /accounts/.wrangler/
 /accounts/.dev.vars*
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/local.properties
+/android/app/src/main/jniLibs/
+/mobile/target/
+/target-android/
+*.jks
+*.keystore

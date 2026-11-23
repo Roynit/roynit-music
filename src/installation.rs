@@ -112,6 +112,7 @@ pub fn install_with(source: &Path, options: &Options) -> Result<Value> {
     let real = test_root().is_none();
     let mut shortcut_created = false;
     if real {
+        remove_legacy_shortcuts();
         let menu =
             PathBuf::from(std::env::var_os("APPDATA").context("Windows Start menu unavailable")?)
                 .join("Microsoft/Windows/Start Menu/Programs/Roy Music.lnk");
@@ -128,6 +129,17 @@ pub fn install_with(source: &Path, options: &Options) -> Result<Value> {
     Ok(
         json!({"installed":true,"path":executable,"shortcut_created":shortcut_created,"data_preserved":true}),
     )
+}
+/// Early versions named the shortcut "Riff Rust"; it would stay in Start pointing at a file that is gone.
+fn remove_legacy_shortcuts() {
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let _ = std::fs::remove_file(
+            PathBuf::from(appdata).join("Microsoft/Windows/Start Menu/Programs/Riff Rust.lnk"),
+        );
+    }
+    if let Some(folder) = desktop_folder() {
+        let _ = std::fs::remove_file(folder.join("Riff Rust.lnk"));
+    }
 }
 fn create_shortcut(lnk: &Path, target: &Path) -> Result<()> {
     let script = "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:RIFF_SHORTCUT); $s.TargetPath=$env:RIFF_INSTALL_TARGET; $s.WorkingDirectory=[IO.Path]::GetDirectoryName($env:RIFF_INSTALL_TARGET); $s.Description='Roy Music by dang'; $s.IconLocation=$env:RIFF_INSTALL_TARGET+',0'; $s.Save()";
@@ -280,6 +292,8 @@ pub fn uninstall(dir: &Path, remove_data: Option<&Path>) -> Result<()> {
         if let Some(folder) = desktop_folder() {
             let _ = std::fs::remove_file(folder.join("Roy Music.lnk"));
         }
+        remove_legacy_shortcuts();
+        crate::startup::disable();
         let _ = reg(&["delete", UNINSTALL_KEY, "/f"]);
     }
     if let Some(data) = remove_data {
