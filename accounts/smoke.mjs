@@ -3,6 +3,8 @@ import { createServer } from "node:http";
 import test from "node:test";
 
 const base = "http://127.0.0.1:8790/api/account";
+// A Google account can belong to one Roynit ID only, so every run of this file uses a fresh one.
+const runId = crypto.randomUUID();
 async function request(path, method = "GET", body, token, expected = 200) {
   const headers = {};
   if (body !== undefined) headers["content-type"] = "application/json";
@@ -94,7 +96,7 @@ test("linking Google and Spotify keeps refresh tokens on the server", async (t) 
         }
         return mock.revoked || form.get("refresh_token") !== "refresh-A" ? send(400, { error: "invalid_grant" }) : send(200, { access_token: "access-1", expires_in: 1800 });
       }
-      if (req.url === "/google/identity") return send(200, { email: "listener@example.test", sub: "google-sub-1" });
+      if (req.url === "/google/identity") return send(200, { email: "listener@example.test", sub: "google-sub-" + runId });
       if (req.url === "/spotify/identity") return send(200, { display_name: "Roy on Spotify" });
       send(404, {});
     });
@@ -231,6 +233,9 @@ test("username changes and passwords", async () => {
   const b = await request("/register", "POST", { email: "v_" + nonce + "@example.test", username: "v_" + nonce, password });
   assert.equal(a.account.has_password, true);
   assert.equal(a.account.has_google, false);
+  // Six characters is the minimum for a password.
+  await request("/register", "POST", { email: "w_" + nonce + "@example.test", username: "w_" + nonce, password: "12345" }, undefined, 400);
+  await request("/register", "POST", { email: "w_" + nonce + "@example.test", username: "w_" + nonce, password: "123456" });
 
   // Usernames are unique: a check says so before saving, and saving a taken one is refused.
   assert.deepEqual(await request("/username/check?name=v_" + nonce, "GET", undefined, a.token), { valid: true, available: false, username: "v_" + nonce });

@@ -1234,10 +1234,10 @@ impl App {
                 }
                 field(ui, "New password", &mut account.new_password, true, 128);
                 field(ui, "Confirm new password", &mut account.confirm_password, true, 128);
-                let long = account.new_password.chars().count() >= 12;
+                let long = account.new_password.chars().count() >= 6;
                 let same = account.new_password == account.confirm_password;
                 let hint = if !account.new_password.is_empty() && !long {
-                    Some(("Use at least 12 characters.", red))
+                    Some(("Use at least 6 characters.", red))
                 } else if !account.confirm_password.is_empty() && !same {
                     Some(("The two passwords do not match.", red))
                 } else {
@@ -1519,7 +1519,7 @@ impl App {
                 }
                 field(ui,"Password",&mut account.password,true,128);
                 if account.register {
-                    muted(ui, "Use at least 12 characters.");
+                    muted(ui, "Use at least 6 characters.");
                 }
                 ui.add_space(8.);
                 ui.horizontal_wrapped(|ui| {

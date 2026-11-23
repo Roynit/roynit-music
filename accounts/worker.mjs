@@ -129,8 +129,8 @@ async function credentials(request, env, register) {
   if (register) {
     const email = str(body.email).trim().toLowerCase();
     const username = str(body.username).trim().toLowerCase();
-    if (email.length > 254 || !emailPattern.test(email) || !/^[a-z0-9_]{3,24}$/.test(username) || password.length < 12) {
-      throw new HttpError(400,"Use a valid email, a 3–24 character username and at least 12 password characters.");
+    if (email.length > 254 || !emailPattern.test(email) || !/^[a-z0-9_]{3,24}$/.test(username) || password.length < 6) {
+      throw new HttpError(400,"Use a valid email, a 3–24 character username and at least 6 password characters.");
     }
     const salt = random();
     const hash = await passwordHash(password, salt);
@@ -593,7 +593,7 @@ async function route(request, env, ctx) {
     await rate(env, request, "password", 10, user.id);
     const body = await json(request);
     const next = str(body.password);
-    if (next.length < 12 || next.length > 128) throw new HttpError(400,"Use a password of 12 to 128 characters.");
+    if (next.length < 6 || next.length > 128) throw new HttpError(400,"Use a password of 6 to 128 characters.");
     if (user.password) {
       const [scheme, salt, expected] = user.password.split(":");
       if (scheme !== "scrypt" || !equal(await passwordHash(str(body.current), salt), expected)) throw new HttpError(401,"Your current password is not correct.");

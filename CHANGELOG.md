@@ -1,3 +1,7 @@
+# Roy Music 0.2.2
+
+- Passwords now need only 6 characters (it was 12), when you create an account and when you set or change one.
+
 # Roy Music 0.2.1
 
 - Change your username in Settings → Accounts. Every username belongs to one person: as you type, Roy Music tells you whether it is free or already taken, and the server refuses a taken one.
