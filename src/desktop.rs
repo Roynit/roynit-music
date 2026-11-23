@@ -5590,7 +5590,7 @@ impl App {
             (
                 "google",
                 "Google / YouTube",
-                "Likes and your playlists shape Mixes",
+                "Sign in with Google too; likes and playlists shape Mixes",
             )
         } else {
             ("spotify", "Spotify", "Import liked songs and playlists")
@@ -5689,6 +5689,25 @@ impl App {
         });
     }
     fn settings_accounts(&mut self, ui: &mut egui::Ui, q: &str) {
+        if !self.roy_account.is_signed_out() {
+            let username = format!("@{}", self.roy_account.username());
+            Self::row(ui, q, "Username", &username, "username name change id", |ui| {
+                if ui.button("Change…").clicked() {
+                    self.roy_account.open_security();
+                }
+            });
+            let has_password = self.roy_account.has_password();
+            let hint = if has_password {
+                "Sign in with your email or username and password"
+            } else {
+                "Not set. You sign in with Google"
+            };
+            Self::row(ui, q, "Password", hint, "password sign in security", |ui| {
+                if ui.button(if has_password { "Change…" } else { "Set password" }).clicked() {
+                    self.roy_account.open_security();
+                }
+            });
+        }
         Self::row(
             ui,
             q,
@@ -7494,6 +7513,7 @@ impl eframe::App for App {
             }
         }
         self.roynit_gate(ctx);
+        self.security_dialog(ctx);
         if !self.roy_account.needs_sign_in() {
             self.settings_dialog(ctx);
             self.import_dialog(ctx);

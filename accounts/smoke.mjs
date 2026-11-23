@@ -94,7 +94,7 @@ test("linking Google and Spotify keeps refresh tokens on the server", async (t) 
         }
         return mock.revoked || form.get("refresh_token") !== "refresh-A" ? send(400, { error: "invalid_grant" }) : send(200, { access_token: "access-1", expires_in: 1800 });
       }
-      if (req.url === "/google/identity") return send(200, { email: "listener@example.test" });
+      if (req.url === "/google/identity") return send(200, { email: "listener@example.test", sub: "google-sub-1" });
       if (req.url === "/spotify/identity") return send(200, { display_name: "Roy on Spotify" });
       send(404, {});
     });
@@ -126,6 +126,9 @@ test("linking Google and Spotify keeps refresh tokens on the server", async (t) 
   const list = await request("/links", "GET", undefined, user.token);
   assert.deepEqual(list.links.map(({ provider, label }) => ({ provider, label })), [{ provider: "google", label: "listener@example.test" }]);
   assert.deepEqual((await request("/links", "GET", undefined, other.token)).links, []);
+  // Linking Google also makes that Google account a way to sign in; it can only belong to one Roynit ID.
+  assert.equal((await request("/me", "GET", undefined, user.token)).account.has_google, true);
+  assert.equal((await request("/me", "GET", undefined, other.token)).account.has_google, false);
   const token = await request("/link/google/token", "POST", undefined, user.token);
   assert.equal(token.access_token, "access-1");
   assert.equal(seen.at(-1).form.refresh_token, "refresh-A", "the stored refresh token round-trips through encryption");
@@ -219,4 +222,37 @@ test("profile cover picture", async () => {
   assert.equal((await request("/social", "GET", undefined, b.token)).friends[0].banner_version, 1);
   assert.equal((await request("/me/banner", "DELETE", undefined, a.token)).account.banner_url, null);
   assert.equal((await fetch(stored.account.banner_url.replace("https://roynit.dangz.org/api/account", base))).status, 404);
+});
+
+test("username changes and passwords", async () => {
+  const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
+  const password = "local-" + crypto.randomUUID();
+  const a = await request("/register", "POST", { email: nonce + "@example.test", username: "u_" + nonce, password });
+  const b = await request("/register", "POST", { email: "v_" + nonce + "@example.test", username: "v_" + nonce, password });
+  assert.equal(a.account.has_password, true);
+  assert.equal(a.account.has_google, false);
+
+  // Usernames are unique: a check says so before saving, and saving a taken one is refused.
+  assert.deepEqual(await request("/username/check?name=v_" + nonce, "GET", undefined, a.token), { valid: true, available: false, username: "v_" + nonce });
+  assert.equal((await request("/username/check?name=new_" + nonce, "GET", undefined, a.token)).available, true);
+  assert.equal((await request("/username/check?name=u_" + nonce, "GET", undefined, a.token)).available, true, "your own name is not taken");
+  assert.equal((await request("/username/check?name=a!", "GET", undefined, a.token)).valid, false);
+  const taken = await request("/me", "PATCH", { username: "@V_" + nonce }, a.token, 409);
+  assert.match(taken.error, /already taken/);
+  await request("/me", "PATCH", { username: "no spaces" }, a.token, 400);
+  assert.equal((await request("/me", "PATCH", { username: "@New_" + nonce }, a.token)).account.username, "new_" + nonce);
+  await request("/login", "POST", { login: "new_" + nonce, password });
+  await request("/login", "POST", { login: "u_" + nonce, password }, undefined, 401);
+
+  // Changing a password needs the current one, and signs other devices out.
+  const second = await request("/login", "POST", { login: "new_" + nonce, password });
+  const next = "another-" + crypto.randomUUID();
+  await request("/me/password", "PUT", { password: next }, a.token, 401);
+  await request("/me/password", "PUT", { current: "wrong-password-123", password: next }, a.token, 401);
+  await request("/me/password", "PUT", { current: password, password: "short" }, a.token, 400);
+  await request("/me/password", "PUT", { current: password, password: next }, a.token);
+  await request("/login", "POST", { login: "new_" + nonce, password }, undefined, 401);
+  await request("/login", "POST", { login: "new_" + nonce, password: next });
+  await request("/me", "GET", undefined, a.token);
+  await request("/me", "GET", undefined, second.token, 401);
 });

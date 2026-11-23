@@ -1,3 +1,9 @@
+# Roy Music 0.2.1
+
+- Change your username in Settings → Accounts. Every username belongs to one person: as you type, Roy Music tells you whether it is free or already taken, and the server refuses a taken one.
+- If you signed up with Google, you can now set a password there, so you can also sign in with your email or username. Accounts with a password can change it (needs the current one); changing it signs your other devices out.
+- If you signed up with an email and password, you can link Google from the same place. After linking, "Continue with Google" signs you in to this same account.
+
 # Roy Music 0.1.11
 
 - Friends: a new Friends button beside Home opens a space like Discord's. Add friends by Roynit username, accept or decline requests, see who is online and the song each friend is listening to right now (with a live progress bar), and chat with direct messages. Set yourself to Invisible from your status card.

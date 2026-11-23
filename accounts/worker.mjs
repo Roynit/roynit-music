@@ -8,8 +8,9 @@ const now = () => Math.floor(Date.now() / 1000);
 const hex = (bytes) => Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
 const random = () => hex(crypto.getRandomValues(new Uint8Array(32)));
 const digest = async (text) => hex(await crypto.subtle.digest("SHA-256", encoder.encode(text)));
-const publicUser = ({id, email, username, display_name, google_subject, bio, avatar_set, avatar_version, banner_set, banner_version, created_at}, base) => ({
+const publicUser = ({id, email, username, display_name, google_subject, password, bio, avatar_set, avatar_version, banner_set, banner_version, created_at}, base) => ({
   id, email, username, display_name, provider: google_subject ? "google" : "password",
+  has_password: !!password, has_google: !!google_subject,
   bio: bio || "", created_at,
   // The version in the URL changes with every upload, so browsers and the app can cache it forever.
   avatar_url: avatar_set ? base + "/avatar/" + id + "?v=" + avatar_version : null,
@@ -95,6 +96,7 @@ function equal(a, b) {
 const str = (value) => typeof value === "string" ? value : "";
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
 const tokenPattern = /^[0-9a-f]{64}$/;
+const usernameOf = (value) => { const name = str(value).trim().replace(/^@/, "").toLowerCase(); return /^[a-z0-9_]{3,24}$/.test(name) ? name : ""; };
 async function rate(env, request, scope, max, identifier = "") {
   const stamp = now();
   const ip = request.headers.get("cf-connecting-ip") || "local";
@@ -353,10 +355,20 @@ async function linkCallback(url, env) {
     // Without a refresh token the app would lose access after an hour, so treat it as a failed link.
     if (!access_token || !refresh_token) return oauthPage(false,true);
     let label = "";
+    let subject = "";
     try {
       const identity = await fetch(providerUrl(env,attempt.provider,"identity"),{headers:{authorization:"Bearer "+access_token}});
-      if (identity.ok) label = PROVIDERS[attempt.provider].label(await identity.json()).slice(0,120);
+      if (identity.ok) {
+        const info = await identity.json();
+        label = PROVIDERS[attempt.provider].label(info).slice(0,120);
+        subject = str(info.sub);
+      }
     } catch {}
+    // Linking Google also lets that Google account sign in to this Roynit ID, unless it already belongs to another one.
+    if (attempt.provider === "google" && subject) {
+      await env.DB.prepare("UPDATE users SET google_subject=?1 WHERE id=?2 AND google_subject IS NULL AND NOT EXISTS (SELECT 1 FROM users WHERE google_subject=?1)")
+        .bind(subject,attempt.user_id).run();
+    }
     await env.DB.prepare("INSERT INTO links(user_id,provider,label,refresh,linked_at) VALUES (?,?,?,?,?) ON CONFLICT(user_id,provider) DO UPDATE SET label=excluded.label,refresh=excluded.refresh,linked_at=excluded.linked_at")
       .bind(attempt.user_id,attempt.provider,label,await seal(env,refresh_token,attempt.user_id+":"+attempt.provider),now()).run();
     return oauthPage(true,true);
@@ -554,9 +566,48 @@ async function route(request, env, ctx) {
       if (bio.length>160) throw new HttpError(400,"Keep your bio to 160 characters or fewer.");
       sets.push("bio=?"); values.push(bio);
     }
+    if ("username" in body) {
+      await rate(env, request, "username", 10, user.id);
+      const name = usernameOf(body.username);
+      if (!name) throw new HttpError(400,"Use 3–24 letters, numbers or underscores.");
+      sets.push("username=?"); values.push(name);
+    }
     if (!sets.length) throw new HttpError(400,"Nothing to update.");
-    const updated = await env.DB.prepare("UPDATE users SET "+sets.join(",")+" WHERE id=? RETURNING *").bind(...values,user.id).first();
+    let updated;
+    try {
+      updated = await env.DB.prepare("UPDATE users SET "+sets.join(",")+" WHERE id=? RETURNING *").bind(...values,user.id).first();
+    } catch (error) {
+      if (String(error?.message).includes("UNIQUE")) throw new HttpError(409,"That username is already taken. Try another.");
+      throw error;
+    }
     return reply({account:publicUser(updated,env.PUBLIC_BASE)});
+  }
+  if (path==="/username/check" && request.method==="GET") {
+    await rate(env, request, "usercheck", 200, user.id);
+    const name = usernameOf(url.searchParams.get("name"));
+    if (!name) return reply({valid:false, available:false});
+    const taken = await env.DB.prepare("SELECT id FROM users WHERE username=? AND id!=?").bind(name,user.id).first();
+    return reply({valid:true, available:!taken, username:name});
+  }
+  if (path==="/me/password" && request.method==="PUT") {
+    await rate(env, request, "password", 10, user.id);
+    const body = await json(request);
+    const next = str(body.password);
+    if (next.length < 12 || next.length > 128) throw new HttpError(400,"Use a password of 12 to 128 characters.");
+    if (user.password) {
+      const [scheme, salt, expected] = user.password.split(":");
+      if (scheme !== "scrypt" || !equal(await passwordHash(str(body.current), salt), expected)) throw new HttpError(401,"Your current password is not correct.");
+    }
+    const salt = random();
+    try {
+      await env.DB.prepare("UPDATE users SET password=? WHERE id=?").bind("scrypt:"+salt+":"+await passwordHash(next, salt), user.id).run();
+    } catch (error) {
+      if (String(error?.message).includes("UNIQUE")) throw new HttpError(409,"Another account already signs in with this email and a password.");
+      throw error;
+    }
+    // Changing a password signs every other device out.
+    await env.DB.prepare("DELETE FROM sessions WHERE user_id=? AND token_hash!=?").bind(user.id, hash).run();
+    return reply({account:publicUser({...user, password:"set"},env.PUBLIC_BASE)});
   }
   if (path==="/me/avatar" && request.method==="PUT") {
     await rate(env, request, "avatar", 20, user.id);

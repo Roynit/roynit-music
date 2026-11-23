@@ -77,6 +77,9 @@ enum Action {
     AvatarRemove,
     Banner,
     BannerRemove,
+    Username,
+    CheckName,
+    Password,
     SignOut,
     ReadMusic,
     WriteMusic,
@@ -119,6 +122,26 @@ pub struct State {
     events: Vec<Event>,
     link_notice: Option<(String, bool)>,
     renew_at: Instant,
+    security_open: bool,
+    new_username: String,
+    name_state: NameState,
+    name_due: Option<Instant>,
+    name_checking: String,
+    current_password: String,
+    new_password: String,
+    confirm_password: String,
+}
+
+/// Where the username being typed stands: unchanged, waiting to be checked, or known free or taken.
+#[derive(Clone, Copy, PartialEq, Default)]
+enum NameState {
+    #[default]
+    Own,
+    Waiting,
+    Checking,
+    Free,
+    Taken,
+    Invalid,
 }
 
 const RENEW_EVERY: Duration = Duration::from_secs(40 * 60);
@@ -182,6 +205,14 @@ impl State {
             events: Vec::new(),
             link_notice: None,
             renew_at: Instant::now() + RENEW_EVERY,
+            security_open: false,
+            new_username: String::new(),
+            name_state: NameState::Own,
+            name_due: None,
+            name_checking: String::new(),
+            current_password: String::new(),
+            new_password: String::new(),
+            confirm_password: String::new(),
         };
         if state.token.is_some() {
             state.request(Action::Check, Value::Null);
@@ -250,8 +281,38 @@ impl State {
         (&self.endpoint, token)
     }
 
+    pub(super) fn has_password(&self) -> bool {
+        self.profile["has_password"] == true
+    }
+
     pub(super) fn username(&self) -> &str {
         self.profile["username"].as_str().unwrap_or_default()
+    }
+
+    /// Opens "Username & password" with the current username filled in.
+    pub(super) fn open_security(&mut self) {
+        self.security_open = true;
+        self.new_username = self.username().to_owned();
+        self.name_state = NameState::Own;
+        self.name_due = None;
+        (self.current_password, self.new_password, self.confirm_password) = Default::default();
+    }
+
+    /// Called when the username box changes: normalise it and schedule a check for whether it is free.
+    fn edit_username(&mut self) {
+        let text = self.new_username.trim().trim_start_matches('@').to_lowercase();
+        let valid = (3..=24).contains(&text.len())
+            && text.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        self.name_state = if text == self.username() {
+            NameState::Own
+        } else if valid {
+            NameState::Waiting
+        } else {
+            NameState::Invalid
+        };
+        self.name_due = (self.name_state == NameState::Waiting)
+            .then(|| Instant::now() + Duration::from_millis(450));
+        self.new_username = text;
     }
 
     pub fn name(&self) -> &str {
@@ -280,6 +341,13 @@ impl State {
             Action::Save => (reqwest::Method::PATCH, "/me".to_owned(), true),
             Action::Avatar => (reqwest::Method::PUT, "/me/avatar".to_owned(), true),
             Action::AvatarRemove => (reqwest::Method::DELETE, "/me/avatar".to_owned(), true),
+            Action::Username => (reqwest::Method::PATCH, "/me".to_owned(), true),
+            Action::CheckName => (
+                reqwest::Method::GET,
+                format!("/username/check?name={}", self.name_checking),
+                true,
+            ),
+            Action::Password => (reqwest::Method::PUT, "/me/password".to_owned(), true),
             Action::Banner => (reqwest::Method::PUT, "/me/banner".to_owned(), true),
             Action::BannerRemove => (reqwest::Method::DELETE, "/me/banner".to_owned(), true),
             Action::SignOut => (reqwest::Method::POST, "/logout".to_owned(), true),
@@ -497,6 +565,27 @@ impl State {
                                     false,
                                 );
                             }
+                            Action::Username | Action::Password => {
+                                self.profile = data["account"].clone();
+                                if action == Action::Username {
+                                    self.name_state = NameState::Own;
+                                    let text = format!("Your username is now @{}.", self.username());
+                                    self.notice(text, false);
+                                } else {
+                                    (self.current_password, self.new_password, self.confirm_password) =
+                                        Default::default();
+                                    self.notice("Password saved. Your other devices were signed out.", false);
+                                }
+                            }
+                            Action::CheckName => {
+                                if data["username"].as_str() == Some(self.new_username.as_str()) {
+                                    self.name_state = if data["available"] == true {
+                                        NameState::Free
+                                    } else {
+                                        NameState::Taken
+                                    };
+                                }
+                            }
                             Action::SignOut => self.clear_session(),
                             Action::Links | Action::LinkRemove(_) => {
                                 self.links = data["links"].clone();
@@ -518,6 +607,8 @@ impl State {
                                         false,
                                     );
                                     self.todo.push_back(Action::LinkToken(provider));
+                                    // Linking Google also turns on Google sign-in: reload the profile's flags.
+                                    self.todo.push_back(Action::Check);
                                 } else if self.linking.is_none() && action == Action::Links {
                                     // First look after sign-in (or a failed renewal): fetch tokens for what is linked.
                                     for provider in Provider::ALL {
@@ -590,6 +681,11 @@ impl State {
                                 self.notice("Music library synced.", false);
                             }
                         },
+                        Err((_, _)) if action == Action::CheckName => {
+                            // Try the check again shortly; nothing to tell the user.
+                            self.name_state = NameState::Waiting;
+                            self.name_due = Some(Instant::now() + Duration::from_secs(3));
+                        }
                         Err((status, error)) => {
                             self.uploading = None;
                             if action == Action::Pickup {
@@ -598,7 +694,10 @@ impl State {
                             if status == Some(StatusCode::UNAUTHORIZED)
                                 && !matches!(
                                     action,
-                                    Action::SignIn | Action::Register | Action::Pickup
+                                    Action::SignIn
+                                        | Action::Register
+                                        | Action::Pickup
+                                        | Action::Password
                                 )
                             {
                                 self.clear_session();
@@ -654,6 +753,14 @@ impl State {
                     self.notice("Account request stopped.", true);
                 }
             }
+        }
+        if self.name_state == NameState::Waiting
+            && self.pending.is_none()
+            && self.name_due.is_some_and(|due| Instant::now() >= due)
+        {
+            self.name_state = NameState::Checking;
+            self.name_checking = self.new_username.clone();
+            self.request(Action::CheckName, Value::Null);
         }
         if self.pending.is_none() && self.token.is_some() {
             if let Some((provider, deadline, next)) = self.linking {
@@ -1055,9 +1162,140 @@ impl App {
         }
     }
 
+    /// Username (unique, checked as you type), password (set or change) and Google sign-in.
+    pub(super) fn security_dialog(&mut self, ctx: &egui::Context) {
+        if !self.roy_account.security_open || self.roy_account.profile.is_null() {
+            return;
+        }
+        let account = &mut self.roy_account;
+        let mut close = false;
+        let frame = egui::Frame::popup(&ctx.style())
+            .inner_margin(24)
+            .corner_radius(12);
+        let modal = egui::Modal::new(egui::Id::new("account-security"))
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.set_width(440.);
+                ui.label(RichText::new("Username & password").size(24.).bold());
+                ui.add_space(14.);
+                let room = (ctx.content_rect().height() - 230.).max(240.);
+                egui::ScrollArea::vertical().max_height(room).auto_shrink([false, true]).show(ui, |ui| {
+                let busy = account.pending.is_some();
+                let green = Color32::from_rgb(0x3B, 0xA5, 0x5C);
+                let red = Color32::from_rgb(244, 155, 158);
+                let button = |text: &str| {
+                    egui::Button::new(RichText::new(text).bold().color(Color32::BLACK))
+                        .fill(Color32::WHITE)
+                        .corner_radius(18)
+                        .min_size(egui::vec2(96., 34.))
+                };
+
+                ui.label(RichText::new("Username").bold());
+                let before = account.new_username.clone();
+                ui.add(
+                    egui::TextEdit::singleline(&mut account.new_username)
+                        .hint_text("username")
+                        .char_limit(26)
+                        .desired_width(f32::INFINITY)
+                        .margin(egui::vec2(12., 9.)),
+                );
+                if account.new_username != before {
+                    account.edit_username();
+                }
+                let typed = account.new_username.clone();
+                let (note, color) = match account.name_state {
+                    NameState::Own => ("This is your username now.".to_owned(), MUTED),
+                    NameState::Waiting | NameState::Checking => ("Checking…".to_owned(), MUTED),
+                    NameState::Free => (format!("@{typed} is available."), green),
+                    NameState::Taken => (format!("@{typed} is already taken. Try another."), red),
+                    NameState::Invalid => ("Use 3–24 letters, numbers or underscores.".to_owned(), red),
+                };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(note).small().color(color));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let free = account.name_state == NameState::Free && !busy;
+                        if ui.add_enabled(free, button("Change")).clicked() {
+                            account.request(Action::Username, json!({"username":typed}));
+                        }
+                    });
+                });
+                muted(ui, "Each username belongs to one person. Friends find you by it.");
+
+                ui.add_space(16.);
+                ui.separator();
+                ui.add_space(10.);
+                let has_password = account.profile["has_password"] == true;
+                ui.label(RichText::new(if has_password { "Change password" } else { "Set a password" }).bold());
+                if has_password {
+                    field(ui, "Current password", &mut account.current_password, true, 128);
+                } else {
+                    muted(ui, "You signed in with Google. A password lets you also sign in with your email or username.");
+                    ui.add_space(4.);
+                }
+                field(ui, "New password", &mut account.new_password, true, 128);
+                field(ui, "Confirm new password", &mut account.confirm_password, true, 128);
+                let long = account.new_password.chars().count() >= 12;
+                let same = account.new_password == account.confirm_password;
+                let hint = if !account.new_password.is_empty() && !long {
+                    Some(("Use at least 12 characters.", red))
+                } else if !account.confirm_password.is_empty() && !same {
+                    Some(("The two passwords do not match.", red))
+                } else {
+                    None
+                };
+                ui.horizontal(|ui| {
+                    if let Some((text, color)) = hint {
+                        ui.label(RichText::new(text).small().color(color));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let ready = long
+                            && same
+                            && !busy
+                            && (!has_password || !account.current_password.is_empty());
+                        if ui.add_enabled(ready, button(if has_password { "Change" } else { "Set" })).clicked() {
+                            account.request(
+                                Action::Password,
+                                json!({"current":account.current_password,"password":account.new_password}),
+                            );
+                        }
+                    });
+                });
+
+                ui.add_space(12.);
+                ui.separator();
+                ui.add_space(10.);
+                ui.label(RichText::new("Google").bold());
+                if account.profile["has_google"] == true {
+                    ui.label(RichText::new("You can sign in with Google.").color(green));
+                } else {
+                    muted(ui, "Link Google to sign in with it, and to use your YouTube likes and playlists.");
+                    if ui.button("Link Google").clicked() {
+                        account.connect(Provider::Google);
+                    }
+                }
+                if !account.status.is_empty() {
+                    ui.add_space(8.);
+                    let color = if account.error { red } else { MUTED };
+                    ui.add(egui::Label::new(RichText::new(&account.status).color(color)).wrap());
+                }
+                });
+                ui.add_space(12.);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(egui::Button::new("Done").frame(false)).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if close || modal.should_close() {
+            account.security_open = false;
+            (account.current_password, account.new_password, account.confirm_password) = Default::default();
+        }
+    }
+
     fn profile_dialog(&mut self, ctx: &egui::Context) {
         let account = &mut self.roy_account;
         let mut close = false;
+        let mut open_security = false;
         let frame = egui::Frame::popup(&ctx.style())
             .inner_margin(24)
             .corner_radius(12);
@@ -1107,6 +1345,13 @@ impl App {
                         });
                     });
                     ui.add_space(12.);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("@{}", account.username())).color(MUTED));
+                        if ui.small_button("Username & password").clicked() {
+                            open_security = true;
+                        }
+                    });
+                    ui.add_space(4.);
                     field(ui, "Name", &mut account.display_name, false, 48);
                     ui.label(RichText::new("Bio").bold());
                     ui.add(
@@ -1161,6 +1406,10 @@ impl App {
                     });
                 });
             });
+        if open_security {
+            account.editing = false;
+            account.open_security();
+        }
         if close || modal.should_close() {
             account.editing = false;
             account.sync_fields();
