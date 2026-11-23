@@ -126,7 +126,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("setup.exe");
         std::fs::write(&program, b"MZ-program-bytes").unwrap();
-        let a = dir.path().join("riff-desktop.exe");
+        let a = dir.path().join("roy-music.exe");
         let b = dir.path().join("signing-status.json");
         std::fs::write(&a, vec![7u8; 50_000]).unwrap();
         std::fs::write(&b, b"{}").unwrap();
@@ -135,7 +135,7 @@ mod tests {
         let mut f = std::fs::File::open(&packed).unwrap();
         let got = entries(&mut f).unwrap();
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0], ("riff-desktop.exe".to_string(), vec![7u8; 50_000]));
+        assert_eq!(got[0], ("roy-music.exe".to_string(), vec![7u8; 50_000]));
         assert_eq!(got[1].1, b"{}");
         assert_eq!(program_bytes(&mut f).unwrap(), b"MZ-program-bytes");
         assert!(pack(&packed, &packed, &[&b]).is_err());

@@ -13,7 +13,6 @@ pub mod lyrics;
 pub mod media;
 #[cfg(feature = "desktop")]
 pub mod media_keys;
-pub mod migration;
 pub mod mixes;
 pub mod model;
 pub mod network;
@@ -1378,7 +1377,6 @@ impl Engine {
             "oauth.adopt",
             "oauth.logout",
             "backup.import",
-            "legacy.import",
         ]
         .contains(&command)
         {
@@ -1400,7 +1398,6 @@ impl Engine {
                 | "cookies.clear"
                 | "oauth.logout"
                 | "backup.import"
-                | "legacy.import"
         ) {
             self.cancel_autoplay();
         }
@@ -1622,20 +1619,6 @@ impl Engine {
                 for id in pending { jobs.push(self.submit_job(&json!({"operation":"download","params":{"id":id,"format":format}}))?); }
                 Ok(json!({"jobs":jobs,"skipped":skipped}))
             },
-            "legacy.import" => {
-                let value = migration::read(&PathBuf::from(text(p, "path")?))?;
-                let (data, summary) = migration::convert(&value, &self.store.data)?;
-                self.store
-                    .export(&self.store.root.join("before-legacy-import.json"))?;
-                self.player.stop();
-                self.store.data = data;
-                self.store.save()?;
-                Ok(summary)
-            }
-            "account.export" => {
-                migration::export(&PathBuf::from(text(p, "path")?), &self.store.data)?;
-                Ok(json!(true))
-            }
             "music.search"
             | "music.home"
             | "music.charts"
@@ -1880,9 +1863,24 @@ impl Engine {
                     name: text(p, "name")?.into(),
                     tracks,
                 };
-                self.store.data.playlists.insert(id, playlist.clone());
+                self.store.data.playlists.insert(id.clone(), playlist.clone());
+                if !self.store.data.playlist_order.contains(&id) {
+                    self.store.data.playlist_order.push(id);
+                }
                 self.store.save()?;
                 Ok(json!(playlist))
+            }
+            "playlist.reorder" => {
+                let wanted: Vec<String> = serde_json::from_value(p["ids"].clone())?;
+                let mut order = Vec::new();
+                for id in wanted.into_iter().chain(self.store.data.ordered_playlists().iter().map(|p| p.id.clone()).collect::<Vec<_>>()) {
+                    if self.store.data.playlists.contains_key(&id) && !order.contains(&id) {
+                        order.push(id);
+                    }
+                }
+                self.store.data.playlist_order = order.clone();
+                self.store.save()?;
+                Ok(json!(order))
             }
             "playlist.delete" => {
                 let id = text(p, "id")?;
@@ -1890,6 +1888,7 @@ impl Engine {
                     self.store.data.playlists.remove(id).is_some(),
                     "Unknown playlist"
                 );
+                self.store.data.playlist_order.retain(|x| x != id);
                 self.store.save()?;
                 Ok(json!(true))
             }
@@ -2280,8 +2279,6 @@ pub const COMMANDS: &[&str] = &[
     "collection.saved",
     "collection.unsave",
     "job.cancel",
-    "legacy.import",
-    "account.export",
     "music.search",
     "music.home",
     "music.charts",
@@ -2324,6 +2321,7 @@ pub const COMMANDS: &[&str] = &[
     "mix.apply",
     "music.mixes",
     "playlist.delete",
+    "playlist.reorder",
     "queue.set",
     "queue.mode",
     "player.play",

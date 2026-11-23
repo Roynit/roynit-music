@@ -5,7 +5,7 @@ Code signing requires a real publisher certificate with a private key and Code S
 For an authorized certificate already in Windows CurrentUser/My, run:
 
 ```powershell
-./scripts/sign.ps1 -Thumbprint YOUR_CERTIFICATE_THUMBPRINT -Files @('target/release/riff-desktop.exe','target/release/riff.exe')
+./scripts/sign.ps1 -Thumbprint YOUR_CERTIFICATE_THUMBPRINT -Files @('target/release/roy-music.exe','target/release/roy.exe')
 ./scripts/package.ps1 -SkipBuild -RequireSigned
 ```
 

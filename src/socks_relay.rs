@@ -196,7 +196,7 @@ fn serve(
             name.eq_ignore_ascii_case("proxy-authorization") && value.trim() == authorization
         });
     if !authorized {
-        local.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"Riff\"\r\nConnection: close\r\n\r\n")?;
+        local.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"Roy Music\"\r\nConnection: close\r\n\r\n")?;
         return Ok(());
     }
     let tunnel = fields[0] == "CONNECT";

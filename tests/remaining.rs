@@ -1,4 +1,4 @@
-use riff_core::{Engine, extensions, installation, store};
+use riff_core::{Engine, installation, store};
 use serde_json::json;
 #[test]
 fn broken_extension_files_do_not_hide_valid_themes_or_plugins() {
@@ -23,24 +23,6 @@ fn broken_extension_files_do_not_hide_valid_themes_or_plugins() {
     assert_eq!(report["themes"]["warnings"].as_array().unwrap().len(), 1);
     assert_eq!(report["plugins"]["warnings"].as_array().unwrap().len(), 1);
     assert!(e.dispatch(&json!({"command":"themes.save","params":{"id":"bad","name":"Bad","tokens":{"mode":"fake"}}})).is_err());
-}
-#[test]
-fn original_appearance_import_converts_supported_settings_without_executing_css() {
-    let root = tempfile::tempdir().unwrap();
-    let mut e = Engine::open(root.path().into()).unwrap();
-    let original = root.path().join("original.json");
-    let value = json!({"localStorage":{"riff_theme_mode":"light","riff_theme_accent":"#123456","riff_font_scale":"120","riff_adv_reduce_motion":"true","riff_custom_css":"body {background:url(https://invalid.test)}"}});
-    store::write_json(&original, &value).unwrap();
-    let result = extensions::import_theme(root.path(), &original).unwrap();
-    assert_eq!(result["converted_legacy"], true);
-    assert_eq!(result["theme"]["tokens"]["mode"], "light");
-    assert_eq!(result["theme"]["tokens"]["accent"], json!([18, 52, 86]));
-    assert_eq!(result["theme"]["tokens"]["font_size"], 18.0);
-    let (data, _) = riff_core::migration::convert(&value, &e.store.data).unwrap();
-    assert_eq!(data.settings["appearance"]["reduced_motion"], true);
-    e.dispatch(&json!({"command":"themes.apply","params":{"id":result["theme"]["id"]}}))
-        .unwrap();
-    assert_eq!(e.store.data.settings["appearance"]["mode"], "light");
 }
 #[test]
 fn cookie_detach_preserves_original_and_logout_survives_restart() {
@@ -81,14 +63,14 @@ fn rollback_staging_checks_receipt_and_never_overwrites_its_input() {
         b"MZ first"
     );
     assert_eq!(
-        std::fs::read(installed.join("riff-desktop.previous.exe")).unwrap(),
+        std::fs::read(installed.join("Roy Music.previous.exe")).unwrap(),
         b"MZ first"
     );
     assert_eq!(
-        std::fs::read(installed.join("riff-desktop.exe")).unwrap(),
+        std::fs::read(installed.join("Roy Music.exe")).unwrap(),
         b"MZ second"
     );
-    std::fs::write(installed.join("riff-desktop.previous.exe"), b"MZ tampered").unwrap();
+    std::fs::write(installed.join("Roy Music.previous.exe"), b"MZ tampered").unwrap();
     assert!(installation::stage_previous(&installed, &staging).is_err());
 }
 #[test]

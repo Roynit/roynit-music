@@ -24,7 +24,7 @@ impl Store {
             .write(true)
             .open(root.join("library.lock"))?;
         lock.try_lock_exclusive()
-            .context("Another Riff Rust process is using this data directory")?;
+            .context("Another Roy Music process is using this data directory")?;
         for dir in ["cache", "downloads", "lyrics", "themes", "plugins"] {
             fs::create_dir_all(root.join(dir))?;
         }

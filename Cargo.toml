@@ -1,6 +1,6 @@
 [package]
 name = "riff-core"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 build = "build.rs"
 license = "MIT"
@@ -12,11 +12,11 @@ description = "Roy Music native Rust music player"
 name = "riff_core"
 
 [[bin]]
-name = "riff"
+name = "roy"
 path = "src/main.rs"
 
 [[bin]]
-name = "riff-desktop"
+name = "roy-music"
 path = "src/desktop.rs"
 required-features = ["desktop"]
 
@@ -37,7 +37,6 @@ desktop = ["dep:eframe", "dep:egui_extras", "dep:image", "dep:rfd", "dep:open", 
 [dependencies]
 unicode-segmentation = { version = "1.13.3", optional = true }
 anyhow = "1"
-aes-gcm = "0.10"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

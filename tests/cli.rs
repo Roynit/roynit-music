@@ -7,7 +7,7 @@ use std::{
 #[test]
 fn session_recovers_from_invalid_json_and_preserves_request_ids() {
     let dir = tempfile::tempdir().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_riff"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_roy"))
         .arg("--data-dir")
         .arg(dir.path())
         .stdin(Stdio::piped())
@@ -45,7 +45,7 @@ fn session_recovers_from_invalid_json_and_preserves_request_ids() {
 #[test]
 fn one_shot_reports_failure_through_exit_status_and_json() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_riff"))
+    let output = Command::new(env!("CARGO_BIN_EXE_roy"))
         .arg("--data-dir")
         .arg(dir.path())
         .arg("--request")

@@ -1,0 +1,836 @@
+//! The Friends space: a friend list with what everyone is listening to, direct messages and profiles.
+//! It takes over the sidebar and the right panel while it is open, the way Discord's home does.
+use super::friends::{Friend, Listening, Person, Playing};
+use super::*;
+use chrono::{Local, TimeZone};
+
+const GREEN: Color32 = Color32::from_rgb(0x3B, 0xA5, 0x5C);
+const OFFLINE: Color32 = Color32::from_gray(0x6B);
+const RED: Color32 = Color32::from_rgb(0xED, 0x42, 0x45);
+
+#[derive(Clone, Copy, PartialEq, Default)]
+pub(super) enum FriendsTab {
+    #[default]
+    Online,
+    All,
+    Pending,
+    Add,
+}
+
+fn initials(name: &str) -> String {
+    let letters: String = name
+        .split_whitespace()
+        .take(2)
+        .filter_map(|word| word.chars().next())
+        .flat_map(char::to_uppercase)
+        .collect();
+    if letters.is_empty() { "?".into() } else { letters }
+}
+
+/// A round picture with initials underneath (shown until the picture loads) and an optional status dot.
+fn paint_person(ui: &egui::Ui, rect: egui::Rect, name: &str, uri: Option<String>, online: Option<bool>, ring: Color32) {
+    let painter = ui.painter();
+    painter.circle_filled(rect.center(), rect.width() / 2., roy_account_ui::tint_for(name));
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        initials(name),
+        egui::FontId::proportional(rect.width() * 0.38),
+        Color32::from_white_alpha(230),
+    );
+    if let Some(uri) = uri {
+        egui::Image::new(uri)
+            .fit_to_exact_size(rect.size())
+            .corner_radius((rect.width() / 2.) as u8)
+            .paint_at(ui, rect);
+    }
+    if let Some(online) = online {
+        let at = rect.right_bottom() - egui::vec2(rect.width() * 0.14, rect.width() * 0.14);
+        let radius = rect.width() * 0.17;
+        painter.circle_filled(at, radius + 2.5, ring);
+        painter.circle_filled(at, radius, if online { GREEN } else { OFFLINE });
+    }
+}
+
+fn clock(seconds: i64) -> String {
+    Local
+        .timestamp_opt(seconds, 0)
+        .single()
+        .map_or_else(String::new, |t| t.format("%H:%M").to_string())
+}
+
+fn day_label(seconds: i64) -> String {
+    let Some(day) = Local.timestamp_opt(seconds, 0).single().map(|t| t.date_naive()) else {
+        return String::new();
+    };
+    let today = Local::now().date_naive();
+    if day == today {
+        "Today".into()
+    } else if today.pred_opt() == Some(day) {
+        "Yesterday".into()
+    } else {
+        day.format("%b %e, %Y").to_string()
+    }
+}
+
+fn last_seen(seconds: Option<i64>) -> String {
+    let Some(seconds) = seconds else {
+        return "Offline".into();
+    };
+    let ago = (chrono::Utc::now().timestamp() - seconds).max(0);
+    match ago {
+        0..=89 => "Just went offline".into(),
+        90..=3599 => format!("Last seen {} min ago", ago / 60),
+        3600..=86_399 => format!("Last seen {} h ago", ago / 3600),
+        _ => format!("Last seen {} d ago", ago / 86_400),
+    }
+}
+
+impl App {
+    /// Called once a frame: keeps the friends service in step with the account and with what is playing.
+    pub(super) fn friends_tick(&mut self) {
+        let (endpoint, token) = self.roy_account.session();
+        self.social.follow(endpoint, token);
+        let playing = self.player["track_id"]
+            .as_str()
+            .and_then(|id| self.library.tracks.get(id))
+            .map(|track| {
+                let duration = self.player["duration"].as_f64().filter(|d| *d > 0.).unwrap_or(track.duration);
+                (
+                    Playing {
+                        title: track.title.clone(),
+                        artist: track.artist.clone(),
+                        cover: track.cover.clone().filter(|c| c.starts_with("https://")),
+                        duration,
+                        playing: self.player["paused"] == false,
+                    },
+                    self.player["position"].as_f64().unwrap_or(0.),
+                )
+            });
+        let open = self.open_chat.clone();
+        let watching = self.page == Page::Friends;
+        self.social.tick(watching, open.as_deref(), playing);
+        if let Some((text, error)) = self.social.notice.take() {
+            self.friends_notice = Some((text, error, Instant::now()));
+        }
+        if self.friends_notice.as_ref().is_some_and(|n| n.2.elapsed() > Duration::from_secs(6)) {
+            self.friends_notice = None;
+        }
+        if let Some(id) = &self.open_chat
+            && self.social.loaded
+            && self.social.friend(id).is_none()
+        {
+            self.open_chat = None;
+        }
+    }
+
+    fn badge_count(&self) -> usize {
+        self.social.requests() + self.social.unread_total() as usize
+    }
+
+    /// The title-bar button, to the left of Home, that opens the Friends space.
+    pub(super) fn friends_button(&mut self, ui: &mut egui::Ui) {
+        let active = self.page == Page::Friends;
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(42., 42.), egui::Sense::click());
+        response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, active, "Friends"));
+        let accent = ui.visuals().selection.bg_fill;
+        let fill = if active { accent.gamma_multiply(0.23) } else { ui.style().interact(&response).bg_fill };
+        let center = rect.center();
+        let painter = ui.painter();
+        painter.circle_filled(center, 20., fill);
+        if response.has_focus() {
+            painter.circle_stroke(center, 20., egui::Stroke::new(1.5_f32, accent));
+        }
+        let ink = if active { accent } else { ui.visuals().text_color() };
+        let stroke = egui::Stroke::new(1.8_f32, ink);
+        // Two people: a front one with a round head and shoulders, a smaller one behind.
+        painter.circle_stroke(center + egui::vec2(-3., -5.), 4.2, stroke);
+        painter.add(egui::Shape::line(
+            [(-10., 9.), (-9., 4.), (-3., 2.), (3., 4.), (4., 9.)]
+                .map(|(x, y)| center + egui::vec2(x, y))
+                .to_vec(),
+            stroke,
+        ));
+        painter.add(egui::Shape::line(
+            [(4., -8.), (7., -7.), (8.5, -3.5), (7., -1.), (10., 3.), (10.5, 9.)]
+                .map(|(x, y)| center + egui::vec2(x, y))
+                .to_vec(),
+            egui::Stroke::new(1.5_f32, ink.gamma_multiply(0.8)),
+        ));
+        let count = self.badge_count();
+        if count > 0 {
+            let at = center + egui::vec2(13., -13.);
+            painter.circle_filled(at, 8.5, Self::chrome(ui.ctx()));
+            painter.circle_filled(at, 7., RED);
+            painter.text(
+                at,
+                egui::Align2::CENTER_CENTER,
+                if count > 9 { "9+".to_owned() } else { count.to_string() },
+                egui::FontId::proportional(9.5),
+                Color32::WHITE,
+            );
+        }
+        if response.on_hover_text("Friends").clicked() {
+            self.navigate(Page::Friends);
+        }
+    }
+
+    fn friend_line(&self, friend: &Friend) -> (String, Color32) {
+        match (&friend.listening, friend.online) {
+            (Some(l), true) => (format!("♫ {} · {}", l.title, l.artist), GREEN),
+            (None, true) => ("Online".into(), MUTED),
+            _ => (last_seen(friend.last_seen), MUTED.gamma_multiply(0.7)),
+        }
+    }
+
+    /// One row of people: picture, name and a second line. Returns the row and where it was clicked.
+    #[allow(clippy::too_many_arguments)]
+    fn person_row(
+        &self,
+        ui: &mut egui::Ui,
+        key: &str,
+        person: &Person,
+        online: Option<bool>,
+        line: (String, Color32),
+        active: bool,
+        height: f32,
+        badge: u32,
+    ) -> (egui::Rect, egui::Response) {
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::click());
+        let hover = ui.ctx().animate_bool_with_time(response.id.with(("row", key)), response.hovered(), self.motion());
+        let fill = if active {
+            Color32::from_white_alpha(22)
+        } else {
+            Color32::from_white_alpha((hover * 16.) as u8)
+        };
+        ui.painter().rect_filled(rect, 8., fill);
+        let size = height - 16.;
+        let art = egui::Rect::from_min_size(rect.left_top() + egui::vec2(8., 8.), egui::vec2(size, size));
+        paint_person(ui, art, &person.display_name, self.social.avatar_uri(person), online, Color32::from_gray(0x1D));
+        let text_left = art.right() + 10.;
+        let width = (rect.right() - text_left - if badge > 0 { 34. } else { 8. }).max(20.);
+        let mut text = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt(("person-text", key))
+                .max_rect(egui::Rect::from_min_size(egui::pos2(text_left, rect.top()), egui::vec2(width, height)))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        text.set_clip_rect(rect.intersect(text.clip_rect()));
+        text.spacing_mut().item_spacing.y = 0.;
+        text.add_space((height - 34.) / 2.);
+        text.add(egui::Label::new(RichText::new(&person.display_name).bold()).truncate().selectable(false));
+        text.add(egui::Label::new(RichText::new(line.0).small().color(line.1)).truncate().selectable(false));
+        if badge > 0 {
+            let at = egui::pos2(rect.right() - 18., rect.center().y);
+            ui.painter().circle_filled(at, 9., RED);
+            ui.painter().text(
+                at,
+                egui::Align2::CENTER_CENTER,
+                if badge > 99 { "99+".to_owned() } else { badge.to_string() },
+                egui::FontId::proportional(10.5),
+                Color32::WHITE,
+            );
+        }
+        (rect, response)
+    }
+
+    fn open_friend(&mut self, id: &str) {
+        self.open_chat = Some(id.to_owned());
+        self.social.open_chat(id);
+        self.navigate(Page::Friends);
+    }
+
+    /// Left panel while Friends is open: the friend list as conversations, and your own status below.
+    pub(super) fn friends_sidebar(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::left("navigation")
+            .exact_width(Self::LIBRARY_WIDTH)
+            .resizable(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(Self::chrome(ctx))
+                    .inner_margin(egui::Margin { left: 8, right: 4, top: 0, bottom: 4 }),
+            )
+            .show(ctx, |ui| {
+                ui.visuals_mut().panel_fill = Color32::BLACK;
+                Self::panel_card(ui, 10, |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.;
+                    let requests = self.social.requests() as u32;
+                    let home = Person { display_name: "Friends".into(), ..Person::default() };
+                    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 44.), egui::Sense::click());
+                    let selected = self.open_chat.is_none();
+                    let hover = ui.ctx().animate_bool_with_time(response.id.with("home"), response.hovered(), self.motion());
+                    ui.painter().rect_filled(
+                        rect,
+                        8.,
+                        Color32::from_white_alpha(if selected { 22 } else { (hover * 16.) as u8 }),
+                    );
+                    ui.painter().text(
+                        rect.left_center() + egui::vec2(14., 0.),
+                        egui::Align2::LEFT_CENTER,
+                        home.display_name,
+                        egui::FontId::proportional(16.),
+                        ui.visuals().text_color(),
+                    );
+                    if requests > 0 {
+                        let at = egui::pos2(rect.right() - 18., rect.center().y);
+                        ui.painter().circle_filled(at, 9., RED);
+                        ui.painter().text(at, egui::Align2::CENTER_CENTER, requests.to_string(), egui::FontId::proportional(10.5), Color32::WHITE);
+                    }
+                    if response.clicked() {
+                        self.open_chat = None;
+                    }
+                    ui.add_space(8.);
+                    ui.label(RichText::new("DIRECT MESSAGES").small().bold().color(MUTED));
+                    ui.add_space(2.);
+                    let mut friends = self.social.friends.clone();
+                    friends.sort_by_key(|f| (!f.online, f.listening.is_none(), f.person.display_name.to_lowercase()));
+                    let room = (ui.available_height() - 70.).max(60.);
+                    egui::ScrollArea::vertical().id_salt("dm-list").max_height(room).auto_shrink([false, false]).show(ui, |ui| {
+                        if friends.is_empty() {
+                            ui.add_space(6.);
+                            ui.label(RichText::new("Add friends to chat and see what they are listening to.").small().color(MUTED));
+                        }
+                        for friend in &friends {
+                            let id = friend.person.id.clone();
+                            let unread = self.social.unread.get(&id).copied().unwrap_or(0);
+                            let line = self.friend_line(friend);
+                            let active = self.open_chat.as_deref() == Some(id.as_str());
+                            let (_, response) = self.person_row(ui, &id, &friend.person, Some(friend.online), line, active, 52., unread);
+                            if response.clicked() {
+                                self.open_friend(&id);
+                            }
+                        }
+                    });
+                    ui.add_space(4.);
+                    self.own_status(ui);
+                });
+            });
+    }
+
+    /// Your own picture and status, pinned to the bottom of the Friends sidebar.
+    fn own_status(&mut self, ui: &mut egui::Ui) {
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 54.), egui::Sense::click());
+        ui.painter().rect_filled(rect, 10., Color32::from_white_alpha(if response.hovered() { 24 } else { 14 }));
+        let art = egui::Rect::from_min_size(rect.left_top() + egui::vec2(8., 9.), egui::vec2(36., 36.));
+        roy_account_ui::paint_avatar(ui, &self.roy_account, art);
+        let hidden = self.social.invisible;
+        let at = art.right_bottom() - egui::vec2(5., 5.);
+        ui.painter().circle_filled(at, 7.5, Color32::from_gray(0x2A));
+        ui.painter().circle_filled(at, 5., if hidden { OFFLINE } else { GREEN });
+        let mut text = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("own-status-text")
+                .max_rect(egui::Rect::from_min_max(egui::pos2(art.right() + 10., rect.top()), rect.right_bottom() - egui::vec2(8., 0.)))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        text.spacing_mut().item_spacing.y = 0.;
+        text.add_space(9.);
+        text.add(egui::Label::new(RichText::new(self.roy_account.name()).bold()).truncate().selectable(false));
+        text.add(egui::Label::new(RichText::new(if hidden { "Invisible" } else { "Online" }).small().color(MUTED)).selectable(false));
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Your status"));
+        egui::Popup::menu(&response).show(|ui| {
+            if ui.selectable_label(!hidden, "Online").clicked() {
+                self.social.set_invisible(false);
+                ui.close();
+            }
+            if ui.selectable_label(hidden, "Invisible").clicked() {
+                self.social.set_invisible(true);
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Edit profile").clicked() {
+                self.navigate(Page::Profile);
+                ui.close();
+            }
+        });
+    }
+
+    /// Right panel while Friends is open: who is listening now, or the profile of the open chat.
+    pub(super) fn friends_side_panel(&mut self, ctx: &egui::Context) {
+        self.side_visible = true;
+        egui::SidePanel::right("now-panel")
+            .exact_width(300.)
+            .resizable(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(Self::chrome(ctx))
+                    .inner_margin(egui::Margin { left: 4, right: 8, top: 0, bottom: 4 }),
+            )
+            .show(ctx, |ui| {
+                ui.visuals_mut().panel_fill = Color32::BLACK;
+                Self::panel_card(ui, 0, |ui| {
+                    let chosen = self.open_chat.as_deref().and_then(|id| self.social.friend(id)).cloned();
+                    egui::ScrollArea::vertical().id_salt("friends-side").auto_shrink([false, false]).show(ui, |ui| {
+                        if let Some(friend) = chosen {
+                            self.profile_card(ui, &friend);
+                        } else {
+                            ui.add_space(16.);
+                            ui.horizontal(|ui| {
+                                ui.add_space(16.);
+                                ui.label(RichText::new("Active now").size(20.).bold());
+                            });
+                            ui.add_space(8.);
+                            let active: Vec<Friend> = self.social.friends.iter().filter(|f| f.online && f.listening.is_some()).cloned().collect();
+                            if active.is_empty() {
+                                ui.add_space(8.);
+                                ui.horizontal(|ui| {
+                                    ui.add_space(16.);
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new("Nobody is listening right now. When a friend plays something, it shows up here.")
+                                                .color(MUTED),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
+                            }
+                            for friend in active {
+                                egui::Frame::new()
+                                    .fill(Color32::from_white_alpha(10))
+                                    .corner_radius(10)
+                                    .inner_margin(egui::Margin::same(12))
+                                    .outer_margin(egui::Margin::symmetric(12, 4))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            let (rect, _) = ui.allocate_exact_size(egui::vec2(28., 28.), egui::Sense::hover());
+                                            paint_person(ui, rect, &friend.person.display_name, self.social.avatar_uri(&friend.person), Some(true), Color32::from_gray(0x25));
+                                            ui.add(egui::Label::new(RichText::new(&friend.person.display_name).bold()).truncate().selectable(false));
+                                        });
+                                        ui.add_space(6.);
+                                        if let Some(listening) = &friend.listening {
+                                            self.listen_card(ui, listening);
+                                        }
+                                    })
+                                    .response
+                                    .interact(egui::Sense::click())
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .clicked()
+                                    .then(|| self.open_friend(&friend.person.id));
+                            }
+                        }
+                    });
+                });
+            });
+    }
+
+    /// The song a friend is playing: cover, title, artist and a moving progress line.
+    fn listen_card(&self, ui: &mut egui::Ui, listening: &Listening) {
+        let position = self.social.position_of(listening);
+        ui.horizontal(|ui| {
+            self.artwork(ui, listening.cover.as_deref(), 52., 1.);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.;
+                ui.add(egui::Label::new(RichText::new(&listening.title).bold()).truncate().selectable(false));
+                ui.add(egui::Label::new(RichText::new(&listening.artist).small().color(MUTED)).truncate().selectable(false));
+                ui.label(
+                    RichText::new(if listening.playing { "Listening on Roy Music" } else { "Paused" })
+                        .small()
+                        .color(if listening.playing { GREEN } else { MUTED }),
+                );
+            });
+        });
+        if listening.duration > 0. {
+            ui.add_space(6.);
+            let (bar, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 4.), egui::Sense::hover());
+            ui.painter().rect_filled(bar, 2., Color32::from_white_alpha(28));
+            let done = (position / listening.duration).clamp(0., 1.) as f32;
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * done, 4.)),
+                2.,
+                ui.visuals().selection.bg_fill,
+            );
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(time(position)).monospace().size(11.).color(MUTED));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(time(listening.duration)).monospace().size(11.).color(MUTED));
+                });
+            });
+            if listening.playing {
+                ui.ctx().request_repaint_after(Duration::from_millis(500));
+            }
+        }
+    }
+
+    /// Discord-style profile: coloured banner, round picture over it, name, bio and what they are playing.
+    fn profile_card(&mut self, ui: &mut egui::Ui, friend: &Friend) {
+        let person = &friend.person;
+        let width = ui.available_width();
+        let (banner, _) = ui.allocate_exact_size(egui::vec2(width, 96.), egui::Sense::hover());
+        let tint = roy_account_ui::tint_for(&person.display_name);
+        let top = egui::CornerRadius { nw: PANEL_RADIUS, ne: PANEL_RADIUS, sw: 0, se: 0 };
+        ui.painter().rect_filled(
+            banner,
+            top,
+            Color32::from_rgb(
+                (tint.r() as f32 * 1.35) as u8,
+                (tint.g() as f32 * 1.35) as u8,
+                (tint.b() as f32 * 1.35) as u8,
+            ),
+        );
+        if let Some(uri) = self.social.banner_uri(person) {
+            Self::paint_cover(ui, banner, &uri, top);
+        }
+        let art = egui::Rect::from_min_size(banner.left_bottom() + egui::vec2(16., -36.), egui::vec2(76., 76.));
+        ui.painter().circle_filled(art.center(), 42., ui.visuals().panel_fill);
+        paint_person(ui, art, &person.display_name, self.social.avatar_uri(person), Some(friend.online), ui.visuals().panel_fill);
+        ui.add_space(46.);
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 0)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(&person.display_name).size(20.).bold());
+            ui.label(RichText::new(format!("@{}", person.username)).color(MUTED));
+            ui.add_space(2.);
+            let (line, color) = self.friend_line(friend);
+            if friend.listening.is_none() {
+                ui.label(RichText::new(line).small().color(color));
+            }
+            if !person.bio.is_empty() {
+                ui.add_space(8.);
+                ui.add(egui::Label::new(RichText::new(&person.bio)).wrap());
+            }
+            ui.add_space(12.);
+            egui::Frame::new()
+                .fill(Color32::from_white_alpha(10))
+                .corner_radius(10)
+                .inner_margin(egui::Margin::same(12))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new("LISTENING TO").small().bold().color(MUTED));
+                    ui.add_space(6.);
+                    match &friend.listening {
+                        Some(listening) => {
+                            self.listen_card(ui, listening);
+                            ui.add_space(8.);
+                            if ui.button("Find this song").clicked() {
+                                self.query = format!("{} {}", listening.title, listening.artist);
+                                self.search_source = 0;
+                                self.submit_search();
+                            }
+                        }
+                        None => {
+                            ui.label(RichText::new("Not playing anything right now.").color(MUTED));
+                        }
+                    }
+                });
+            ui.add_space(12.);
+            ui.menu_button("More", |ui| {
+                if ui.button("Remove friend").clicked() {
+                    let sure = rfd::MessageDialog::new()
+                        .set_title("Remove friend?")
+                        .set_description(format!("{} will be removed from your friends and your chat with them is deleted.", person.display_name))
+                        .set_buttons(rfd::MessageButtons::YesNo)
+                        .show()
+                        == rfd::MessageDialogResult::Yes;
+                    if sure {
+                        self.social.remove(&person.id);
+                        self.open_chat = None;
+                    }
+                    ui.close();
+                }
+            });
+        });
+    }
+
+    /// The main area of the Friends space: the lists, or the open conversation.
+    pub(super) fn friends_page(&mut self, ui: &mut egui::Ui) {
+        ui.visuals_mut().panel_fill = Color32::BLACK;
+        if !self.social.signed_in() {
+            ui.add_space(40.);
+            ui.label(RichText::new("Sign in with your Roynit ID to add friends and chat.").size(18.).color(MUTED));
+            return;
+        }
+        if let Some(id) = self.open_chat.clone()
+            && let Some(friend) = self.social.friend(&id).cloned()
+        {
+            self.chat_view(ui, &friend);
+            return;
+        }
+        self.friends_header(ui);
+        if let Some((text, error, _)) = self.friends_notice.clone() {
+            ui.add_space(6.);
+            ui.label(RichText::new(text).color(if error { Color32::from_rgb(255, 170, 178) } else { GREEN }));
+        }
+        ui.add_space(8.);
+        match self.friends_tab {
+            FriendsTab::Online | FriendsTab::All => self.friend_list(ui),
+            FriendsTab::Pending => self.pending_list(ui),
+            FriendsTab::Add => self.add_friend(ui),
+        }
+    }
+
+    fn friends_header(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 18.;
+            ui.label(RichText::new("Friends").size(26.).bold());
+            let pending = self.social.requests();
+            for (tab, label) in [
+                (FriendsTab::Online, "Online".to_owned()),
+                (FriendsTab::All, "All".to_owned()),
+                (FriendsTab::Pending, if pending > 0 { format!("Pending ({pending})") } else { "Pending".to_owned() }),
+            ] {
+                if Self::tab(ui, &label, self.friends_tab == tab, 16.).clicked() {
+                    self.friends_tab = tab;
+                }
+            }
+            let accent = ui.visuals().selection.bg_fill;
+            let on_accent = ui.visuals().selection.stroke.color;
+            let adding = self.friends_tab == FriendsTab::Add;
+            let button = egui::Button::new(RichText::new("Add friend").bold().color(if adding { accent } else { on_accent }))
+                .fill(if adding { accent.gamma_multiply(0.2) } else { accent })
+                .corner_radius(8);
+            if ui.add(button).clicked() {
+                self.friends_tab = FriendsTab::Add;
+            }
+        });
+    }
+
+    fn friend_list(&mut self, ui: &mut egui::Ui) {
+        ui.add(
+            egui::TextEdit::singleline(&mut self.friend_filter)
+                .hint_text("Search friends")
+                .desired_width(ui.available_width().min(420.)),
+        );
+        ui.add_space(8.);
+        let needle = self.friend_filter.trim().to_lowercase();
+        let only_online = self.friends_tab == FriendsTab::Online;
+        let mut friends: Vec<Friend> = self
+            .social
+            .friends
+            .iter()
+            .filter(|f| (!only_online || f.online) && (needle.is_empty() || format!("{} {}", f.person.display_name, f.person.username).to_lowercase().contains(&needle)))
+            .cloned()
+            .collect();
+        friends.sort_by_key(|f| (!f.online, f.listening.is_none(), f.person.display_name.to_lowercase()));
+        if friends.is_empty() {
+            ui.add_space(30.);
+            let message = if !self.social.loaded {
+                "Loading your friends…"
+            } else if self.social.friends.is_empty() {
+                "No friends yet. Add someone with their Roynit username."
+            } else if only_online {
+                "Nobody is online right now."
+            } else {
+                "No friends match your search."
+            };
+            ui.label(RichText::new(message).size(16.).color(MUTED));
+            if self.social.loaded && self.social.friends.is_empty() && ui.button("Add a friend").clicked() {
+                self.friends_tab = FriendsTab::Add;
+            }
+            return;
+        }
+        let word = if only_online { "Online" } else { "All friends" };
+        ui.label(RichText::new(format!("{word} — {}", friends.len())).small().bold().color(MUTED));
+        ui.add_space(4.);
+        egui::ScrollArea::vertical().id_salt("friend-rows").auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.;
+            for friend in &friends {
+                let id = friend.person.id.clone();
+                let line = self.friend_line(friend);
+                let (rect, response) = self.person_row(ui, &id, &friend.person, Some(friend.online), line, false, 60., 0);
+                let mut actions = ui.new_child(
+                    egui::UiBuilder::new()
+                        .id_salt(("friend-actions", &id))
+                        .max_rect(rect.shrink2(egui::vec2(10., 0.)))
+                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                );
+                actions.menu_button(RichText::new("•••").color(MUTED), |ui| {
+                    if ui.button("Message").clicked() {
+                        self.open_friend(&id);
+                        ui.close();
+                    }
+                    if ui.button("Remove friend").clicked() {
+                        let sure = rfd::MessageDialog::new()
+                            .set_title("Remove friend?")
+                            .set_description(format!("{} will be removed and your chat with them is deleted.", friend.person.display_name))
+                            .set_buttons(rfd::MessageButtons::YesNo)
+                            .show()
+                            == rfd::MessageDialogResult::Yes;
+                        if sure {
+                            self.social.remove(&id);
+                        }
+                        ui.close();
+                    }
+                });
+                if actions.button("Message").clicked() || response.clicked() {
+                    self.open_friend(&id);
+                }
+            }
+        });
+    }
+
+    fn pending_list(&mut self, ui: &mut egui::Ui) {
+        let (incoming, outgoing) = (self.social.incoming.clone(), self.social.outgoing.clone());
+        if incoming.is_empty() && outgoing.is_empty() {
+            ui.add_space(30.);
+            ui.label(RichText::new("No pending requests.").size(16.).color(MUTED));
+            return;
+        }
+        egui::ScrollArea::vertical().id_salt("pending-rows").auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.;
+            for (title, people, mine) in [("Incoming", &incoming, false), ("Sent", &outgoing, true)] {
+                if people.is_empty() {
+                    continue;
+                }
+                ui.label(RichText::new(format!("{title} — {}", people.len())).small().bold().color(MUTED));
+                for person in people {
+                    let line = (format!("@{}", person.username), MUTED);
+                    let (rect, _) = self.person_row(ui, &person.id, person, None, line, false, 60., 0);
+                    let mut actions = ui.new_child(
+                        egui::UiBuilder::new()
+                            .id_salt(("pending-actions", &person.id))
+                            .max_rect(rect.shrink2(egui::vec2(10., 0.)))
+                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                    );
+                    if actions.button(if mine { "Cancel" } else { "Decline" }).clicked() {
+                        self.social.answer(&person.id, false);
+                    }
+                    if !mine && actions.button(RichText::new("Accept").bold()).clicked() {
+                        self.social.answer(&person.id, true);
+                    }
+                }
+                ui.add_space(10.);
+            }
+        });
+    }
+
+    fn add_friend(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Add friend").size(20.).bold());
+        ui.label(RichText::new("Add a friend with their Roynit username.").color(MUTED));
+        ui.add_space(10.);
+        let mut submit = false;
+        egui::Frame::new()
+            .fill(ui.visuals().extreme_bg_color)
+            .stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(20)))
+            .corner_radius(10)
+            .inner_margin(egui::Margin::symmetric(12, 6))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width().min(560.));
+                ui.horizontal(|ui| {
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut self.friend_input)
+                            .frame(false)
+                            .hint_text("Enter a username")
+                            .char_limit(25)
+                            .desired_width(ui.available_width() - 150.),
+                    );
+                    submit |= field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let accent = ui.visuals().selection.bg_fill;
+                        let on_accent = ui.visuals().selection.stroke.color;
+                        let ready = !self.friend_input.trim().is_empty();
+                        let button = egui::Button::new(RichText::new("Send request").bold().color(on_accent)).fill(accent).corner_radius(8);
+                        submit |= ui.add_enabled(ready, button).clicked();
+                    });
+                });
+            });
+        if submit && !self.friend_input.trim().is_empty() {
+            let name = std::mem::take(&mut self.friend_input);
+            self.social.add_friend(name.trim());
+        }
+        ui.add_space(14.);
+        let me = self.roy_account.username();
+        if !me.is_empty() {
+            ui.label(RichText::new(format!("Your username is @{me}. Share it so friends can find you.")).color(MUTED));
+        }
+    }
+
+    fn chat_view(&mut self, ui: &mut egui::Ui, friend: &Friend) {
+        let id = friend.person.id.clone();
+        ui.horizontal(|ui| {
+            if Self::icon_button(ui, "←", "Back to friends", false).clicked() {
+                self.open_chat = None;
+            }
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(36., 36.), egui::Sense::hover());
+            paint_person(ui, rect, &friend.person.display_name, self.social.avatar_uri(&friend.person), Some(friend.online), ui.visuals().panel_fill);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.;
+                ui.label(RichText::new(&friend.person.display_name).size(18.).bold());
+                let (line, color) = self.friend_line(friend);
+                ui.label(RichText::new(line).small().color(color));
+            });
+        });
+        ui.add_space(6.);
+        ui.separator();
+        let input_height = 54.;
+        let room = (ui.available_height() - input_height).max(80.);
+        let width = ui.available_width();
+        let accent = ui.visuals().selection.bg_fill;
+        let messages = self.social.chats.get(&id).map(|c| c.messages.clone()).unwrap_or_default();
+        egui::ScrollArea::vertical()
+            .id_salt(("chat", &id))
+            .max_height(room)
+            .min_scrolled_height(room)
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 3.;
+                if messages.is_empty() {
+                    ui.add_space(24.);
+                    ui.label(RichText::new(format!("This is the start of your chat with {}.", friend.person.display_name)).color(MUTED));
+                }
+                let mut day = String::new();
+                for (i, message) in messages.iter().enumerate() {
+                    let label = day_label(message.at);
+                    if label != day {
+                        ui.add_space(8.);
+                        ui.vertical_centered(|ui| ui.label(RichText::new(&label).small().bold().color(MUTED)));
+                        ui.add_space(4.);
+                        day = label;
+                    }
+                    let next = messages.get(i + 1);
+                    let last_of_run = next.is_none_or(|n| n.mine != message.mine || n.at - message.at > 300);
+                    let layout = if message.mine {
+                        egui::Layout::top_down(egui::Align::Max)
+                    } else {
+                        egui::Layout::top_down(egui::Align::Min)
+                    };
+                    ui.with_layout(layout, |ui| {
+                        egui::Frame::new()
+                            .fill(if message.mine { accent.gamma_multiply(0.38) } else { Color32::from_white_alpha(18) })
+                            .corner_radius(14)
+                            .inner_margin(egui::Margin::symmetric(12, 7))
+                            .show(ui, |ui| {
+                                ui.set_max_width((width * 0.7).max(160.));
+                                ui.add(egui::Label::new(RichText::new(&message.body)).wrap());
+                            });
+                        if last_of_run {
+                            ui.label(RichText::new(clock(message.at)).size(10.5).color(MUTED.gamma_multiply(0.8)));
+                            ui.add_space(4.);
+                        }
+                    });
+                }
+            });
+        let mut send = false;
+        ui.add_space(6.);
+        ui.horizontal(|ui| {
+            let draft = &mut self.social.chats.entry(id.clone()).or_default().draft;
+            egui::Frame::new()
+                .fill(ui.visuals().extreme_bg_color)
+                .stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(20)))
+                .corner_radius(22)
+                .inner_margin(egui::Margin::symmetric(16, 6))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width() - 56.);
+                    let field = ui.add(
+                        egui::TextEdit::singleline(draft)
+                            .id(egui::Id::new(("chat-input", &id)))
+                            .frame(false)
+                            .char_limit(1000)
+                            .hint_text(format!("Message {}", friend.person.display_name))
+                            .desired_width(f32::INFINITY),
+                    );
+                    if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        send = true;
+                        field.request_focus();
+                    }
+                });
+            let ready = !draft.trim().is_empty();
+            let on_accent = ui.visuals().selection.stroke.color;
+            let button = egui::Button::new(RichText::new("Send").bold().color(on_accent)).fill(accent).corner_radius(18);
+            send |= ui.add_enabled(ready, button).clicked();
+        });
+        if send {
+            self.social.send(&id);
+        }
+    }
+}

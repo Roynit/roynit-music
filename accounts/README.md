@@ -11,6 +11,8 @@ npx wrangler d1 migrations apply roynit-accounts --local
 npx wrangler dev --local --ip 127.0.0.1 --port 8790
 ```
 
+Add `REGISTER_LIMIT=200` to the git-ignored `accounts/.dev.vars` so the smoke suite can create enough test accounts (the default is 8 per 10 minutes per address). Social features (friends, presence, messages) need migration `0004_social.sql`; apply it with `npx wrangler d1 migrations apply roynit-accounts --remote` before deploying.
+
 Run `node --test accounts/smoke.mjs` from the repository root. For the desktop app, set `ROYNIT_ACCOUNT_ENDPOINT=http://127.0.0.1:8790/api/account` before launch and open **Roynit ID** from the top-left menu. Use a separate desktop data directory with `--data-dir` when testing.
 
 ## Enable Google sign-in

@@ -87,7 +87,7 @@ fn required(p: &Value, name: &str) -> Result<String> {
         .into())
 }
 
-/// Unofficial translation endpoint, matching Riff's best-effort external lookup behavior.
+/// Unofficial translation endpoint, as a best-effort external lookup.
 pub fn translate(client: &reqwest::blocking::Client, p: &Value) -> Result<Value> {
     let text = p["text"].as_str().context("Missing text")?;
     ensure!(text.len() <= 10000, "Translation text too large");

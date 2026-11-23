@@ -131,7 +131,7 @@ fn installer_copies_owned_files_and_retains_previous_executable() {
     std::fs::write(&source, b"MZ second").unwrap();
     riff_core::installation::copy_bundle(&source, &target).unwrap();
     assert_eq!(
-        std::fs::read(target.join("riff-desktop.previous.exe")).unwrap(),
+        std::fs::read(target.join("Roy Music.previous.exe")).unwrap(),
         b"MZ first"
     );
 }

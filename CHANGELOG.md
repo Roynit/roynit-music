@@ -1,3 +1,11 @@
+# Roy Music 0.1.11
+
+- Friends: a new Friends button beside Home opens a space like Discord's. Add friends by Roynit username, accept or decline requests, see who is online and the song each friend is listening to right now (with a live progress bar), and chat with direct messages. Set yourself to Invisible from your status card.
+- Profiles show a cover picture behind the avatar. Choose or remove yours in Edit profile; friends see it on your profile card.
+- Playlists can be reordered by dragging the grip on the right of a tile, and deleted from the tile's menu or by right-click. Songs in a playlist or the queue can be dragged into a new order the same way. Selecting songs with Ctrl+click adds "Delete from playlist". Rows slide, lift and fade smoothly (off with Reduce motion).
+- Windows now shows "Roy Music" (not "riff-desktop") in the volume mixer and Task Manager: the installed program is "Roy Music.exe". Installing over an older version removes the old file names.
+- The remaining Riff wording is gone, and so is importing the original Riff account and settings.
+
 # Roy Music 0.1.10
 
 - Far fewer "No verified recording matching ..." errors on Spotify and SoundCloud songs, remixes included. When the first search finds nothing playable, Roy Music now widens it: the lead artist alone, the bare title, accent-free spelling, and YouTube videos as well as songs. It also stops requiring every credited artist to match, accepts an artist named in the video title, and ignores accents. Wrong versions are still refused: a different artist, an original instead of a remix, a live cut, or a different length.

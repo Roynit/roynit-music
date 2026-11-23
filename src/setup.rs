@@ -581,13 +581,13 @@ fn run_item(
                 path.clone()
             } else {
                 anyhow::ensure!(
-                    entries.iter().any(|(n, _)| n == "riff-desktop.exe"),
+                    entries.iter().any(|(n, _)| n == "roy-music.exe"),
                     "This Setup has no program files inside. Use the packaged Roy-Music Setup"
                 );
                 for (name, bytes) in &entries {
                     std::fs::write(staging.path().join(name), bytes)?;
                 }
-                staging.path().join("riff-desktop.exe")
+                staging.path().join("roy-music.exe")
             };
             note(Some(0.35), "Closing Roy Music if it is open".into());
             installation::close_instances(&dir)?;
@@ -1346,7 +1346,7 @@ impl Setup {
         }
         self.launched = true;
         if !self.args.no_launch && installation::test_root().is_none() {
-            let exe = self.dir.join("riff-desktop.exe");
+            let exe = self.dir.join(installation::APP_EXE);
             let _ = riff_core::tools::command(exe.to_str().unwrap_or("")).spawn();
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);

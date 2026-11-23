@@ -8,6 +8,12 @@ use std::{
 pub fn test_root() -> Option<PathBuf> {
     std::env::var_os("ROY_SETUP_TEST_ROOT").map(PathBuf::from)
 }
+/// The installed program is "Roy Music.exe" so Windows (volume mixer, Task Manager) shows its real name.
+pub const APP_EXE: &str = "Roy Music.exe";
+const PREVIOUS_EXE: &str = "Roy Music.previous.exe";
+const CLI_EXE: &str = "roy.exe";
+/// File names from before the rename; they are cleaned up when the app is installed over an older version.
+const OLD_NAMES: [&str; 3] = ["riff-desktop.exe", "riff-desktop.previous.exe", "riff.exe"];
 pub fn install_directory() -> Result<PathBuf> {
     if let Some(root) = test_root() {
         return Ok(root.join("app"));
@@ -24,18 +30,22 @@ pub fn install_directory() -> Result<PathBuf> {
 pub fn copy_bundle(source: &Path, target: &Path) -> Result<PathBuf> {
     ensure!(source.is_file(), "Application executable is missing");
     std::fs::create_dir_all(target)?;
-    let destination = target.join("riff-desktop.exe");
+    let destination = target.join(APP_EXE);
     if source.canonicalize().ok() != destination.canonicalize().ok() {
         let mut input = std::fs::File::open(source)?;
         let mut temp = tempfile::NamedTempFile::new_in(target)?;
         std::io::copy(&mut input, &mut temp)?;
         temp.as_file().sync_all()?;
-        if destination.is_file() {
-            std::fs::copy(&destination, target.join("riff-desktop.previous.exe"))?;
+        let installed = [destination.clone(), target.join(OLD_NAMES[0])];
+        if let Some(old) = installed.iter().find(|p| p.is_file()) {
+            std::fs::copy(old, target.join(PREVIOUS_EXE))?;
         }
         temp.persist(&destination)
             .map_err(|e| e.error)
-            .context("Close the installed Riff window before replacing its executable")?;
+            .context("Close the installed Roy Music window before replacing its executable")?;
+    }
+    for old in OLD_NAMES {
+        let _ = std::fs::remove_file(target.join(old));
     }
     std::fs::write(target.join("LICENSE"), include_str!("../LICENSE"))?;
     std::fs::write(
@@ -55,22 +65,22 @@ pub fn copy_bundle(source: &Path, target: &Path) -> Result<PathBuf> {
     }
     if let Some(cli) = source
         .parent()
-        .map(|p| p.join("riff.exe"))
+        .map(|p| p.join(CLI_EXE))
         .filter(|p| p.is_file())
     {
-        let to = target.join("riff.exe");
+        let to = target.join(CLI_EXE);
         if cli.canonicalize().ok() != to.canonicalize().ok() {
             std::fs::copy(cli, to)?;
         }
     }
-    let previous = target.join("riff-desktop.previous.exe");
+    let previous = target.join(PREVIOUS_EXE);
     let previous_sha256 = if previous.is_file() {
         Some(crate::store::file_hash(&previous)?)
     } else {
         None
     };
     let mut manifest = tempfile::NamedTempFile::new_in(target)?;
-    manifest.write_all(serde_json::to_string_pretty(&json!({"version":env!("CARGO_PKG_VERSION"),"files":["riff-desktop.exe","riff.exe","LICENSE","install.json"],"user_data_separate":true,"previous_sha256":previous_sha256}))?.as_bytes())?;
+    manifest.write_all(serde_json::to_string_pretty(&json!({"version":env!("CARGO_PKG_VERSION"),"files":[APP_EXE,CLI_EXE,"LICENSE","install.json"],"user_data_separate":true,"previous_sha256":previous_sha256}))?.as_bytes())?;
     manifest
         .persist(target.join("install.json"))
         .map_err(|e| e.error)?;
@@ -90,8 +100,8 @@ pub fn install_with(source: &Path, options: &Options) -> Result<Value> {
     ensure!(
         !source
             .file_name()
-            .is_some_and(|s| s.eq_ignore_ascii_case("riff.exe")),
-        "Use the desktop application to install Riff"
+            .is_some_and(|s| s.eq_ignore_ascii_case(CLI_EXE)),
+        "Use the desktop application to install Roy Music"
     );
     let target = install_directory()?;
     let executable = copy_bundle(source, &target)?;
@@ -174,7 +184,7 @@ fn reg_set(name: &str, kind: &str, value: &str) -> Result<()> {
 }
 /// Make Roy Music appear in Windows Settings → Apps with a working Uninstall button.
 pub fn register_uninstall(dir: &Path) -> Result<()> {
-    let exe = dir.join("riff-desktop.exe");
+    let exe = dir.join(APP_EXE);
     let uninstall = dir.join("uninstall.exe");
     let kb = walkdir::WalkDir::new(dir)
         .into_iter()
@@ -229,7 +239,7 @@ pub fn installed_version(dir: &Path) -> Option<String> {
 }
 /// Process ids of Roy Music running from `dir`.
 pub fn running_instances(dir: &Path) -> Vec<u32> {
-    let script = "Get-Process riff-desktop -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ($env:RIFF_DIR + '\\*') } | ForEach-Object { $_.Id }";
+    let script = "Get-Process -Name 'Roy Music','riff-desktop' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ($env:RIFF_DIR + '\\*') } | ForEach-Object { $_.Id }";
     let Ok(out) = crate::tools::command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("RIFF_DIR", dir)
@@ -247,7 +257,7 @@ pub fn close_instances(dir: &Path) -> Result<()> {
     if running_instances(dir).is_empty() {
         return Ok(());
     }
-    let script = "Get-Process riff-desktop -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ($env:RIFF_DIR + '\\*') } | ForEach-Object { [void]$_.CloseMainWindow(); if (-not $_.WaitForExit(3000)) { $_.Kill() } }";
+    let script = "Get-Process -Name 'Roy Music','riff-desktop' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ($env:RIFF_DIR + '\\*') } | ForEach-Object { [void]$_.CloseMainWindow(); if (-not $_.WaitForExit(3000)) { $_.Kill() } }";
     crate::tools::command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("RIFF_DIR", dir)
@@ -308,7 +318,7 @@ pub fn wait_for(pid: u32) -> Result<()> {
         .status()?;
     ensure!(
         status.success(),
-        "Riff did not close before the update timeout"
+        "Roy Music did not close before the update timeout"
     );
     Ok(())
 }
@@ -316,7 +326,11 @@ pub fn wait_for(pid: u32) -> Result<()> {
 /// Stage a receipt-verified previous version; never overwrite an executable being read.
 pub fn stage_previous(directory: &Path, staging: &Path) -> Result<Value> {
     use std::io::Read;
-    let previous = directory.join("riff-desktop.previous.exe");
+    let previous = [PREVIOUS_EXE, OLD_NAMES[1]]
+        .map(|name| directory.join(name))
+        .into_iter()
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| directory.join(PREVIOUS_EXE));
     ensure!(
         std::fs::symlink_metadata(&previous)?.is_file(),
         "No regular previous-version executable"
@@ -372,7 +386,7 @@ mod receipt_tests {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("app");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("riff-desktop.exe"), b"x").unwrap();
+        std::fs::write(dir.join(APP_EXE), b"x").unwrap();
         // SAFETY: tests in this module are the only ones touching this variable.
         unsafe { std::env::set_var("ROY_SETUP_TEST_ROOT", root.path()) };
         uninstall(&dir, None).unwrap();

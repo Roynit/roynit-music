@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod friends;
+mod friends_ui;
 mod import_ui;
+mod reorder_ui;
 mod roy_account_ui;
 mod system_media;
 use eframe::egui::{self, Color32, RichText};
@@ -129,6 +132,7 @@ enum Page {
     Settings,
     Browse,
     Profile,
+    Friends,
 }
 impl Page {
     fn title(self) -> &'static str {
@@ -146,6 +150,7 @@ impl Page {
             Self::Settings => "Settings",
             Self::Browse => "YouTube Music collection",
             Self::Profile => "Profile",
+            Self::Friends => "Friends",
         }
     }
 }
@@ -274,6 +279,15 @@ struct App {
     settings_query: String,
     settings_panel_stash: Option<Option<Page>>,
     settings_open: bool,
+    ghosts: Vec<reorder_ui::Ghost>,
+    social: friends::Social,
+    friends_tab: friends_ui::FriendsTab,
+    friend_input: String,
+    friend_filter: String,
+    open_chat: Option<String>,
+    friends_notice: Option<(String, bool, Instant)>,
+    pending_playlist_order: Option<(Vec<String>, Instant)>,
+    pending_track_order: Option<(String, Vec<String>, Instant)>,
     import_source: Option<usize>,
     import_tab: u8,
     import_to_favorites: bool,
@@ -344,10 +358,10 @@ impl App {
             use tray_icon::menu::{Menu, MenuEvent, MenuItem};
             let menu = Menu::new();
             for (id, label) in [
-                ("riff_show", "Show Riff"),
+                ("riff_show", "Show Roy Music"),
                 ("riff_toggle", "Play / pause"),
                 ("riff_next", "Next track"),
-                ("riff_quit", "Quit Riff"),
+                ("riff_quit", "Quit Roy Music"),
             ] {
                 menu.append(&MenuItem::with_id(id, label, true, None))?;
             }
@@ -525,6 +539,15 @@ impl App {
             settings_query: String::new(),
             settings_panel_stash: None,
             settings_open: false,
+            ghosts: Vec::new(),
+            social: friends::Social::new(),
+            friends_tab: friends_ui::FriendsTab::default(),
+            friend_input: String::new(),
+            friend_filter: String::new(),
+            open_chat: None,
+            friends_notice: None,
+            pending_playlist_order: None,
+            pending_track_order: None,
             import_source: None,
             import_tab: 0,
             import_to_favorites: false,
@@ -633,7 +656,7 @@ impl App {
             })
             .is_err()
         {
-            self.error = Some("Audio engine is no longer running. Restart Riff.".into());
+            self.error = Some("Audio engine is no longer running. Restart Roy Music.".into());
         }
     }
     fn job(&mut self, tag: &str, operation: &str, params: Value) {
@@ -823,7 +846,7 @@ impl App {
                     match open::that(url) {
                         Ok(_) => {
                             self.status =
-                                "Complete sign-in in your browser, then return to Riff.".into()
+                                "Complete sign-in in your browser, then return to Roy Music.".into()
                         }
                         Err(e) => self.error = Some(e.to_string()),
                     }
@@ -1478,7 +1501,7 @@ impl App {
                             let pairs = url.query_pairs().collect::<HashMap<_, _>>();
                             let code = pairs.get("code").map(|v| v.to_string());
                             let state = pairs.get("state").map(|v| v.to_string());
-                            let body = "Sign-in callback received. You can return to Riff.";
+                            let body = "Sign-in callback received. You can return to Roy Music.";
                             let _ = write!(
                                 stream,
                                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -1544,15 +1567,110 @@ impl App {
             self.selection_bar(ui);
         }
         let accent = ui.visuals().selection.bg_fill;
-        let reorder = matches!(self.page, Page::Queue | Page::Playlists);
+        let list_id = match self.page {
+            Page::Queue => Some("queue".to_owned()),
+            Page::Playlists => self.active_playlist.clone(),
+            _ => None,
+        };
+        let reorder = list_id.is_some();
         let selecting = !self.selected.is_empty();
         let mut hovered = None;
         let mut first_visible = None;
+        // Reorderable lists give every row a key (id + occurrence) so a song added twice still drags right.
+        let mut keys: Vec<String> = Vec::new();
+        if reorder {
+            let mut seen = std::collections::HashMap::new();
+            keys = tracks
+                .iter()
+                .map(|t| {
+                    let n = seen.entry(t.id.clone()).or_insert(0usize);
+                    *n += 1;
+                    format!("{}#{n}", t.id)
+                })
+                .collect();
+            // Until the saved order comes back from the engine, keep showing the order that was just dropped.
+            if let Some((owner, wanted, at)) = &self.pending_track_order {
+                let (mut a, mut b) = (wanted.clone(), keys.clone());
+                a.sort();
+                b.sort();
+                let wanted = wanted.clone();
+                if Some(owner) != list_id.as_ref()
+                    || wanted == keys
+                    || at.elapsed() > Duration::from_millis(1500)
+                    || a != b
+                {
+                    self.pending_track_order = None;
+                } else {
+                    let mut by_key: std::collections::HashMap<String, Track> =
+                        keys.iter().cloned().zip(tracks.drain(..)).collect();
+                    tracks = wanted.iter().filter_map(|k| by_key.remove(k)).collect();
+                    keys = wanted;
+                }
+            }
+        }
+        let real_count = tracks.len();
+        let mut items: Vec<(Track, String, Option<Instant>)> = tracks
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| (t, keys.get(i).cloned().unwrap_or_default(), None))
+            .collect();
+        self.ghosts.retain(|g| reorder_ui::collapse(g.at) > 0.);
+        if let Some(id) = &list_id {
+            for g in self.ghosts.iter().filter(|g| &g.list == id) {
+                if let reorder_ui::Snapshot::Track(t) = &g.snapshot {
+                    items.insert(g.index.min(items.len()), (t.clone(), g.key.clone(), Some(g.at)));
+                }
+            }
+            if self.ghosts.iter().any(|g| &g.list == id) {
+                ui.ctx().request_repaint();
+            }
+        }
+        let mut seen_real = 0;
+        let real_index: Vec<usize> = items
+            .iter()
+            .map(|item| {
+                if item.2.is_some() {
+                    seen_real
+                } else {
+                    seen_real += 1;
+                    seen_real - 1
+                }
+            })
+            .collect();
+        let collapse_of = |ghost: Option<Instant>| ghost.map_or(1., reorder_ui::collapse);
         ui.spacing_mut().item_spacing.y = 2.;
-        for (index, track) in tracks.iter().enumerate() {
+        let mut list = reorder.then(|| {
+            reorder_ui::List::begin(
+                ui,
+                list_id.as_deref().unwrap_or("rows"),
+                items.iter().map(|i| i.1.clone()).collect(),
+                items.iter().map(|i| 50. * collapse_of(i.2)).collect(),
+                items.iter().map(|i| 48. * collapse_of(i.2)).collect(),
+                items.iter().map(|i| i.2.is_none()).collect(),
+                self.motion(),
+            )
+        });
+        let order: Vec<usize> = list.as_ref().map_or_else(|| (0..items.len()).collect(), |l| l.order());
+        for i in order {
+            let (track, key, ghost) = &items[i];
+            let index = real_index[i];
+            let alpha = collapse_of(*ghost);
+            let lift = list.as_ref().map_or(0., |l| l.lift(ui, i));
+            let (rect, response) = match &list {
+                Some(l) => {
+                    let rect = l.rect(i);
+                    if rect.height() < 1. {
+                        continue;
+                    }
+                    let sense = if ghost.is_some() { egui::Sense::hover() } else { egui::Sense::click() };
+                    (rect, ui.interact(rect, ui.id().with(("track-row", key)), sense))
+                }
+                None => ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 48.),
+                    egui::Sense::click(),
+                ),
+            };
             let current = self.player["track_id"] == track.id;
-            let (rect, response) =
-                ui.allocate_exact_size(egui::vec2(ui.available_width(), 48.), egui::Sense::click());
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(
                     egui::WidgetType::Button,
@@ -1567,12 +1685,15 @@ impl App {
                     pointer_inside || response.has_focus(),
                     self.motion(),
                 );
-                let fill = if current {
+                reorder_ui::paint_lift(ui, rect, 10, lift);
+                let fill = if lift > 0. {
+                    Color32::from_gray(0x2A)
+                } else if current {
                     Color32::from_white_alpha(14)
                 } else {
                     Color32::from_white_alpha((hover * 20.) as u8)
                 };
-                ui.painter().rect_filled(rect, 10., fill);
+                ui.painter().rect_filled(rect, 10., fill.gamma_multiply(alpha));
                 if response.has_focus() {
                     ui.painter().rect_stroke(
                         rect,
@@ -1581,13 +1702,15 @@ impl App {
                         egui::StrokeKind::Inside,
                     );
                 }
-                let inner = rect.shrink2(egui::vec2(8., 0.));
+                let inner = rect.shrink2(egui::vec2(8., 0.)).with_max_x(rect.right() - 8. - if reorder { reorder_ui::GRIP - 8. } else { 0. });
                 ui.scope_builder(
                     egui::UiBuilder::new()
                         .id_salt(("row", &track.id, index))
                         .max_rect(inner)
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                     |ui| {
+                        ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+                        ui.set_opacity(alpha);
                         ui.spacing_mut().item_spacing.x = 10.;
                         let lead = egui::vec2(30., 48.);
                         let is_selected = self.selected.contains(&track.id);
@@ -1711,9 +1834,17 @@ impl App {
                                 .color(MUTED),
                         );
                         self.like_button(ui, track);
-                        self.track_menu(ui, track, index, tracks.len(), reorder);
+                        if ghost.is_none() {
+                            self.track_menu(ui, track, index, real_count, reorder);
+                        }
                     },
                 );
+            }
+            if ghost.is_some() {
+                continue;
+            }
+            if let Some(l) = list.as_mut() {
+                l.grip(ui, i, rect);
             }
             if response.clicked() && ui.input(|i| i.modifiers.command) {
                 if let Some(at) = self.selected.iter().position(|id| id == &track.id) {
@@ -1733,6 +1864,30 @@ impl App {
                 if pointer_inside {
                     hovered = Some(track.clone());
                 }
+            }
+        }
+        if let Some(order) = list.and_then(reorder_ui::List::finish) {
+            let wanted: Vec<String> = order
+                .into_iter()
+                .filter(|&i| items[i].2.is_none())
+                .map(|i| items[i].1.clone())
+                .collect();
+            let real: Vec<&(Track, String, Option<Instant>)> =
+                items.iter().filter(|i| i.2.is_none()).collect();
+            let place = |key: &String| real.iter().position(|i| &i.1 == key);
+            if let Some(id) = &list_id {
+                if self.page == Page::Queue {
+                    let order: Vec<usize> = wanted.iter().filter_map(place).collect();
+                    self.send("queue", "queue.reorder", json!({"order":order}));
+                } else if let Some(mut playlist) = self.library.playlists.get(id).cloned() {
+                    playlist.tracks = wanted
+                        .iter()
+                        .filter_map(place)
+                        .map(|i| real[i].0.id.clone())
+                        .collect();
+                    self.send("playlist", "playlist.save", json!(playlist));
+                }
+                self.pending_track_order = Some((id.clone(), wanted, Instant::now()));
             }
         }
         if let Some(track) = hovered {
@@ -1809,6 +1964,16 @@ impl App {
                     }
                     if ui.button("Clear").clicked() {
                         self.selected.clear();
+                    }
+                    if self.page == Page::Playlists
+                        && ui
+                            .button(
+                                RichText::new("Delete from playlist")
+                                    .color(Color32::from_rgb(255, 170, 178)),
+                            )
+                            .clicked()
+                    {
+                        self.remove_selected_from_playlist();
                     }
                 });
             });
@@ -1989,7 +2154,16 @@ impl App {
                     .and_then(|id| self.library.playlists.get(id))
                     .cloned()
                 {
-                    list.tracks.remove(index);
+                    let removed = list.tracks.remove(index);
+                    if let Some(gone) = self.library.tracks.get(&removed).cloned() {
+                        self.ghosts.push(reorder_ui::Ghost {
+                            list: list.id.clone(),
+                            key: format!("gone-{}-{index}", removed),
+                            index,
+                            at: Instant::now(),
+                            snapshot: reorder_ui::Snapshot::Track(gone),
+                        });
+                    }
                     self.send("playlist", "playlist.save", json!(list));
                 }
                 ui.close();
@@ -2006,6 +2180,36 @@ impl App {
                 format!("Options for {} [{}]", track.title, track.id),
             )
         });
+    }
+    /// Takes every selected song out of the open playlist (they stay in the library); each row fades out.
+    fn remove_selected_from_playlist(&mut self) {
+        let Some(mut list) = self
+            .active_playlist
+            .as_ref()
+            .and_then(|id| self.library.playlists.get(id))
+            .cloned()
+        else {
+            return;
+        };
+        let mut seen = std::collections::HashMap::new();
+        let mut kept = Vec::new();
+        for (index, id) in list.tracks.iter().enumerate() {
+            let n = seen.entry(id.clone()).or_insert(0usize);
+            *n += 1;
+            match self.library.tracks.get(id).filter(|_| self.selected.contains(id)) {
+                Some(track) => self.ghosts.push(reorder_ui::Ghost {
+                    list: list.id.clone(),
+                    key: format!("{id}#{n}"),
+                    index,
+                    at: Instant::now(),
+                    snapshot: reorder_ui::Snapshot::Track(track.clone()),
+                }),
+                None => kept.push(id.clone()),
+            }
+        }
+        list.tracks = kept;
+        self.selected.clear();
+        self.send("playlist", "playlist.save", json!(list));
     }
     fn move_track(&mut self, from: usize, to: usize) {
         if self.page == Page::Queue {
@@ -3580,6 +3784,10 @@ impl App {
     }
 
     fn navigation(&mut self, ctx: &egui::Context) {
+        if self.page == Page::Friends {
+            self.friends_sidebar(ctx);
+            return;
+        }
         egui::SidePanel::left("navigation")
             .exact_width(Self::LIBRARY_WIDTH)
             .resizable(false)
@@ -3693,40 +3901,7 @@ impl App {
                             {
                                 self.navigate(Page::Favorites);
                             }
-                            let mut playlists: Vec<_> = self.library.playlists.values().collect();
-                            playlists.sort_by_cached_key(|playlist| playlist.name.to_lowercase());
-                            let mut selected = None;
-                            for playlist in playlists {
-                                if !Self::matches(&self.sidebar_query, &[&playlist.name]) {
-                                    continue;
-                                }
-                                let cover = playlist
-                                    .tracks
-                                    .iter()
-                                    .filter_map(|id| self.library.tracks.get(id))
-                                    .find_map(|track| track.cover.as_deref());
-                                let active = self.page == Page::Playlists
-                                    && self.active_playlist.as_deref()
-                                        == Some(playlist.id.as_str());
-                                if self
-                                    .library_tile(
-                                        ui,
-                                        &playlist.name,
-                                        playlist.tracks.len(),
-                                        cover,
-                                        "♫",
-                                        active,
-                                    )
-                                    .clicked()
-                                {
-                                    selected = Some((playlist.id.clone(), playlist.name.clone()));
-                                }
-                            }
-                            if let Some((id, name)) = selected {
-                                self.active_playlist = Some(id);
-                                self.rename_playlist = name;
-                                self.navigate(Page::Playlists);
-                            }
+                            self.playlist_list(ui);
                         });
                 })
             });
@@ -3741,20 +3916,45 @@ impl App {
         glyph: &str,
         active: bool,
     ) -> egui::Response {
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 54.), egui::Sense::click());
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 54.), egui::Sense::hover());
+        let id = ui.id().with(("tile", name));
+        self.tile_at(ui, rect, id, egui::Sense::click(), name, count, cover, glyph, active, 1., 0.)
+    }
+
+    /// A library tile drawn into `rect`. `alpha` fades it (a playlist being removed) and `lift` raises it
+    /// off the page while it is dragged.
+    #[allow(clippy::too_many_arguments)]
+    fn tile_at(
+        &self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        id: egui::Id,
+        sense: egui::Sense,
+        name: &str,
+        count: usize,
+        cover: Option<&str>,
+        glyph: &str,
+        active: bool,
+        alpha: f32,
+        lift: f32,
+    ) -> egui::Response {
+        let response = ui.interact(rect, id, sense);
         response.widget_info(|| {
             egui::WidgetInfo::selected(egui::WidgetType::Button, true, active, name)
         });
         let accent = ui.visuals().selection.bg_fill;
-        if active || response.hovered() {
-            let fill = if active {
-                accent.gamma_multiply(0.18)
-            } else {
-                ui.visuals().widgets.hovered.weak_bg_fill
-            };
-            ui.painter().rect_filled(rect, 9, fill);
-        }
+        reorder_ui::paint_lift(ui, rect, 9, lift);
+        let hover = ui
+            .ctx()
+            .animate_bool_with_time(id.with("hover"), response.hovered() || lift > 0., self.motion());
+        let fill = if lift > 0. {
+            Color32::from_gray(0x2A)
+        } else if active {
+            accent.gamma_multiply(0.18)
+        } else {
+            ui.visuals().widgets.hovered.weak_bg_fill.gamma_multiply(hover)
+        };
+        ui.painter().rect_filled(rect, 9, fill.gamma_multiply(alpha));
         if response.has_focus() {
             ui.painter().rect_stroke(
                 rect,
@@ -3771,6 +3971,8 @@ impl App {
                     .max_rect(inner)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
+            ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+            ui.set_opacity(alpha);
             if cover.is_some() {
                 self.artwork(ui, cover, 40., 1.);
             } else {
@@ -3806,6 +4008,166 @@ impl App {
             });
         }
         response.on_hover_text(name)
+    }
+
+    /// The playlists in the sidebar: drag one to move it, right-click or use its menu to delete it.
+    fn playlist_list(&mut self, ui: &mut egui::Ui) {
+        struct Row {
+            key: String,
+            name: String,
+            count: usize,
+            cover: Option<String>,
+            ghost: Option<Instant>,
+        }
+        let filtering = !self.sidebar_query.trim().is_empty();
+        let mut ids: Vec<String> = self.library.ordered_playlists().iter().map(|p| p.id.clone()).collect();
+        if let Some((pending, at)) = &self.pending_playlist_order {
+            let same: std::collections::HashSet<_> = pending.iter().collect();
+            if *pending == ids || at.elapsed() > Duration::from_millis(1500) || same != ids.iter().collect() {
+                self.pending_playlist_order = None;
+            } else {
+                ids = pending.clone();
+            }
+        }
+        let mut rows: Vec<Row> = ids
+            .iter()
+            .filter_map(|id| self.library.playlists.get(id))
+            .filter(|p| Self::matches(&self.sidebar_query, &[&p.name]))
+            .map(|p| Row {
+                key: p.id.clone(),
+                name: p.name.clone(),
+                count: p.tracks.len(),
+                cover: p
+                    .tracks
+                    .iter()
+                    .filter_map(|id| self.library.tracks.get(id))
+                    .find_map(|t| t.cover.clone()),
+                ghost: None,
+            })
+            .collect();
+        self.ghosts.retain(|g| reorder_ui::collapse(g.at) > 0.);
+        if !filtering {
+            for ghost in self.ghosts.iter().filter(|g| g.list == "playlists") {
+                if let reorder_ui::Snapshot::Playlist { name, count, cover } = &ghost.snapshot {
+                    rows.insert(
+                        ghost.index.min(rows.len()),
+                        Row { key: ghost.key.clone(), name: name.clone(), count: *count, cover: cover.clone(), ghost: Some(ghost.at) },
+                    );
+                }
+            }
+        }
+        if self.ghosts.iter().any(|g| g.list == "playlists") {
+            ui.ctx().request_repaint();
+        }
+        let factor = |row: &Row| row.ghost.map_or(1., reorder_ui::collapse);
+        let mut list = reorder_ui::List::begin(
+            ui,
+            "playlists",
+            rows.iter().map(|r| r.key.clone()).collect(),
+            rows.iter().map(|r| 56. * factor(r)).collect(),
+            rows.iter().map(|r| 54. * factor(r)).collect(),
+            rows.iter().map(|r| !filtering && r.ghost.is_none()).collect(),
+            self.motion(),
+        );
+        let (mut open, mut delete) = (None, None);
+        for i in list.order() {
+            let row = &rows[i];
+            let rect = list.rect(i);
+            if rect.height() < 1. {
+                continue;
+            }
+            let active = self.page == Page::Playlists && self.active_playlist.as_deref() == Some(row.key.as_str());
+            let id = ui.id().with(("playlist-tile", &row.key));
+            let sense = if row.ghost.is_some() { egui::Sense::hover() } else { egui::Sense::click() };
+            let lift = list.lift(ui, i);
+            let response = self.tile_at(ui, rect, id, sense, &row.name, row.count, row.cover.as_deref(), "♫", active, factor(row), lift);
+            if row.ghost.is_some() {
+                continue;
+            }
+            list.grip(ui, i, rect);
+            if response.clicked() {
+                open = Some((row.key.clone(), row.name.clone()));
+            }
+            // A "•••" appears on hover; the same menu opens on right-click.
+            let dots = egui::Rect::from_center_size(
+                egui::pos2(rect.right() - reorder_ui::GRIP - 14., rect.center().y),
+                egui::vec2(30., 30.),
+            );
+            let hot = response.hovered() && !list.is_held(i);
+            let dots_response = ui.interact(dots, id.with("dots"), egui::Sense::click());
+            if hot || dots_response.hovered() {
+                let color = if dots_response.hovered() { Color32::WHITE } else { MUTED };
+                ui.painter().text(dots.center(), egui::Align2::CENTER_CENTER, "•••", egui::FontId::proportional(14.), color);
+            }
+            let menu = |ui: &mut egui::Ui| {
+                if ui.button("Open playlist").clicked() {
+                    open = Some((row.key.clone(), row.name.clone()));
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .button(RichText::new("Delete playlist").color(Color32::from_rgb(255, 170, 178)))
+                    .clicked()
+                {
+                    delete = Some(i);
+                    ui.close();
+                }
+            };
+            egui::Popup::menu(&dots_response).show(menu);
+            response.context_menu(|ui| {
+                if ui.button("Open playlist").clicked() {
+                    open = Some((row.key.clone(), row.name.clone()));
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .button(RichText::new("Delete playlist").color(Color32::from_rgb(255, 170, 178)))
+                    .clicked()
+                {
+                    delete = Some(i);
+                    ui.close();
+                }
+            });
+        }
+        let reordered = list.finish();
+        let keys: Vec<String> = rows.iter().map(|r| r.key.clone()).collect();
+        if let Some(order) = reordered {
+            let ids: Vec<String> = order.into_iter().map(|i| keys[i].clone()).collect();
+            self.pending_playlist_order = Some((ids.clone(), Instant::now()));
+            self.send("playlist-order", "playlist.reorder", json!({"ids":ids}));
+        }
+        if let Some((id, name)) = open {
+            self.active_playlist = Some(id);
+            self.rename_playlist = name;
+            self.navigate(Page::Playlists);
+        }
+        if let Some(i) = delete {
+            self.confirm_delete_playlist(&rows[i].key, &rows[i].name, rows[i].count, rows[i].cover.clone(), i);
+        }
+    }
+
+    /// Asks first, then removes the playlist; its tile fades and collapses instead of vanishing.
+    fn confirm_delete_playlist(&mut self, id: &str, name: &str, count: usize, cover: Option<String>, index: usize) {
+        let sure = rfd::MessageDialog::new()
+            .set_title("Delete playlist?")
+            .set_description(format!("“{name}” will be removed. Songs stay in your library."))
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show()
+            == rfd::MessageDialogResult::Yes;
+        if !sure {
+            return;
+        }
+        self.ghosts.push(reorder_ui::Ghost {
+            list: "playlists".into(),
+            key: id.to_owned(),
+            index,
+            at: Instant::now(),
+            snapshot: reorder_ui::Snapshot::Playlist { name: name.to_owned(), count, cover },
+        });
+        self.send("playlist", "playlist.delete", json!({"id":id}));
+        if self.active_playlist.as_deref() == Some(id) {
+            self.active_playlist = None;
+        }
     }
 
     fn save_new_playlist(&mut self) {
@@ -3876,7 +4238,7 @@ impl App {
         let drag_regions = [
             egui::Rect::from_min_max(
                 egui::pos2(left, header.top()),
-                egui::pos2(search.left() - 49., header.bottom()),
+                egui::pos2(search.left() - 97., header.bottom()),
             ),
             egui::Rect::from_min_max(
                 egui::pos2(search.right() + 5., header.top()),
@@ -4125,10 +4487,11 @@ impl App {
                         #[cfg(windows)]
                         let caption_left = ui.cursor().left() + 5.;
                         let field_width = (ctx.content_rect().width() * 0.34).clamp(310., 435.);
-                        let group_width = field_width + 64.;
+                        let group_width = field_width + 64. + 48.;
                         let start = (ctx.content_rect().center().x - group_width / 2.)
                             .max(edge + Self::LIBRARY_WIDTH);
                         ui.add_space((start - ui.cursor().left()).max(0.));
+                        self.friends_button(ui);
                         self.home_button(ui);
                         let pill = egui::Rect::from_min_size(
                             egui::pos2(ui.cursor().left(), ui.max_rect().center().y - 20.),
@@ -4830,7 +5193,7 @@ impl App {
         (
             "💾",
             "Data & updates",
-            "backup restore import export riff rfacc data folder diagnostics report install update version release rollback",
+            "backup restore import export data folder diagnostics report install update version release rollback",
         ),
     ];
     /// The settings rows for the chosen group, or for every group that matches the search.
@@ -5563,22 +5926,22 @@ impl App {
             ui,
             q,
             "Themes",
-            "Import a Roynit or original Riff theme",
+            "Import a Roy Music theme file",
             "theme import export",
             |ui| {
                 if ui.button("Export").clicked()
                     && let Some(path) = rfd::FileDialog::new()
-                        .set_file_name("riff-theme.json")
+                        .set_file_name("roy-music-theme.json")
                         .save_file()
                 {
-                    let value = json!({"id":"exported-theme","name":"My Riff theme","tokens":self.appearance});
+                    let value = json!({"id":"exported-theme","name":"My theme","tokens":self.appearance});
                     if let Err(e) = riff_core::store::write_json(&path, &value) {
                         self.error = Some(format!("Couldn't export theme: {e}"));
                     }
                 }
                 if ui.button("Import…").clicked()
                     && let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Riff JSON theme or settings", &["json"])
+                        .add_filter("Roy Music theme", &["json"])
                         .pick_file()
                 {
                     self.send("theme-import", "themes.import", json!({"path":path}));
@@ -5642,7 +6005,7 @@ impl App {
             "export import restore json",
             |ui| {
                 if ui.button("Restore…").clicked()
-                && let Some(path) = rfd::FileDialog::new().add_filter("Riff JSON", &["json"]).pick_file()
+                && let Some(path) = rfd::FileDialog::new().add_filter("Roy Music backup", &["json"]).pick_file()
                 && rfd::MessageDialog::new()
                     .set_title("Replace library?")
                     .set_description("This replaces the current library with the selected backup. A before-import backup is kept.")
@@ -5654,33 +6017,10 @@ impl App {
             }
                 if ui.button("Export…").clicked()
                     && let Some(path) = rfd::FileDialog::new()
-                        .set_file_name("riff-library.json")
+                        .set_file_name("roy-music-library.json")
                         .save_file()
                 {
                     self.send("backup", "backup.export", json!({"path":path}));
-                }
-            },
-        );
-        Self::row(
-            ui,
-            q,
-            "Original Riff account",
-            "",
-            "rfacc migrate import export",
-            |ui| {
-                if ui.button("Export .rfacc…").clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .set_file_name("riff-account.rfacc")
-                        .save_file()
-                {
-                    self.send("export", "account.export", json!({"path":path}));
-                }
-                if ui.button("Import…").clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Original Riff account", &["rfacc", "json"])
-                        .pick_file()
-                {
-                    self.send("migration", "legacy.import", json!({"path":path}));
                 }
             },
         );
@@ -5693,7 +6033,7 @@ impl App {
         Self::row(ui, q, "Diagnostic report", "", "support logs", |ui| {
             if ui.button("Save…").clicked()
                 && let Some(path) = rfd::FileDialog::new()
-                    .set_file_name("riff-diagnostics.json")
+                    .set_file_name("roy-music-diagnostics.json")
                     .save_file()
             {
                 self.send("support", "support.export", json!({"path":path}));
@@ -6632,7 +6972,7 @@ impl App {
             self.header_gradient(ui);
         }
         ui.add_space(12.);
-        if !matches!(self.page, Page::Browse | Page::Search | Page::Profile) {
+        if !matches!(self.page, Page::Browse | Page::Search | Page::Profile | Page::Friends) {
             let title = if self.page == Page::Home {
                 Self::greeting()
             } else {
@@ -6643,6 +6983,7 @@ impl App {
         }
         match self.page {
             Page::Profile => self.roynit_profile(ui),
+            Page::Friends => self.friends_page(ui),
             Page::Search => self.search_content(ui),
             Page::Home | Page::Browse => {
                 if self.page == Page::Browse
@@ -7248,9 +7589,14 @@ impl eframe::App for App {
                 });
             return;
         }
+        self.friends_tick();
         self.player_bar(ctx);
         self.search_bar(ctx);
-        self.side_panel(ctx);
+        if self.page == Page::Friends {
+            self.friends_side_panel(ctx);
+        } else {
+            self.side_panel(ctx);
+        }
         self.navigation(ctx);
         let right: i8 = if self.side_visible { 20 } else { 24 };
         egui::CentralPanel::default()
@@ -7268,8 +7614,9 @@ impl eframe::App for App {
                 // The card is the panel grown back over its padding, so content keeps a 16 px gutter.
                 let card = ui.max_rect().expand2(egui::vec2(16., 0.));
                 self.card_rect = card;
-                ui.painter()
-                    .rect_filled(card, PANEL_RADIUS, ui.visuals().panel_fill);
+                // The Friends space is pure black, like the window chrome around it.
+                let fill = if self.page == Page::Friends { Color32::BLACK } else { ui.visuals().panel_fill };
+                ui.painter().rect_filled(card, PANEL_RADIUS, fill);
                 // Pages ease in: a short fade and rise tells the eye the content changed.
                 if self.page_seen != self.page as u8 {
                     self.page_seen = self.page as u8;

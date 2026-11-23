@@ -8,11 +8,12 @@ const now = () => Math.floor(Date.now() / 1000);
 const hex = (bytes) => Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
 const random = () => hex(crypto.getRandomValues(new Uint8Array(32)));
 const digest = async (text) => hex(await crypto.subtle.digest("SHA-256", encoder.encode(text)));
-const publicUser = ({id, email, username, display_name, google_subject, bio, avatar_set, avatar_version, created_at}, base) => ({
+const publicUser = ({id, email, username, display_name, google_subject, bio, avatar_set, avatar_version, banner_set, banner_version, created_at}, base) => ({
   id, email, username, display_name, provider: google_subject ? "google" : "password",
   bio: bio || "", created_at,
   // The version in the URL changes with every upload, so browsers and the app can cache it forever.
   avatar_url: avatar_set ? base + "/avatar/" + id + "?v=" + avatar_version : null,
+  banner_url: banner_set ? base + "/banner/" + id + "?v=" + banner_version : null,
 });
 const reply = (body, status = 200) => Response.json(body, {
   status, headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" },
@@ -68,9 +69,9 @@ function imageMatches(type, data) {
   if (type === "image/png") return start(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
   return type === "image/webp" && start(0x52, 0x49, 0x46, 0x46) && data[8] === 0x57 && data[9] === 0x45 && data[10] === 0x42 && data[11] === 0x50;
 }
-async function avatar(id, env) {
+async function avatar(id, env, table = "avatars") {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) throw new HttpError(404, "Not found.");
-  const row = await env.DB.prepare("SELECT content_type,data FROM avatars WHERE user_id=?").bind(id).first();
+  const row = await env.DB.prepare("SELECT content_type,data FROM " + table + " WHERE user_id=?").bind(id).first();
   if (!row) throw new HttpError(404, "Not found.");
   return new Response(new Uint8Array(row.data), { headers: {
     "content-type": row.content_type, "cache-control": "public, max-age=31536000, immutable",
@@ -119,7 +120,7 @@ async function authenticate(request, env) {
   return {user, hash};
 }
 async function credentials(request, env, register) {
-  await rate(env, request, register ? "register" : "login", register ? 8 : 25);
+  await rate(env, request, register ? "register" : "login", register ? Number(env.REGISTER_LIMIT) || 8 : 25);
   const body = await json(request);
   const password = str(body.password);
   if (password.length > 128 || !password) throw new HttpError(400,"Invalid password.");
@@ -384,6 +385,126 @@ async function linkToken(request, env, user, provider) {
   }
   return reply({access_token,expires_in:Number.isFinite(expires_in) ? expires_in : 3600});
 }
+// ---- Friends, presence and direct messages ----
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const ONLINE_FOR = 75;
+const pairOf = (a, b) => a < b ? [a, b] : [b, a];
+const person = (row) => ({id:row.id, username:row.username, display_name:row.display_name, bio:row.bio || "",
+  avatar_version:row.avatar_set ? row.avatar_version : 0, banner_version:row.banner_set ? row.banner_version : 0});
+async function friendship(env, me, other) {
+  const [low, high] = pairOf(me, other);
+  return env.DB.prepare("SELECT * FROM friendships WHERE low=? AND high=?").bind(low, high).first();
+}
+async function requireFriend(env, me, other) {
+  if (!uuidPattern.test(other)) throw new HttpError(404, "Not found.");
+  const row = await friendship(env, me, other);
+  if (row?.status !== "accepted") throw new HttpError(403, "You are not friends with that person.");
+}
+async function socialSnapshot(env, user) {
+  const stamp = now();
+  const {results} = await env.DB.prepare(
+    "SELECT f.status,f.requester,u.id,u.username,u.display_name,u.bio,u.avatar_set,u.avatar_version,u.banner_set,u.banner_version,p.seen_at,p.invisible,p.listening "
+    + "FROM friendships f JOIN users u ON u.id=CASE WHEN f.low=?1 THEN f.high ELSE f.low END "
+    + "LEFT JOIN presence p ON p.user_id=u.id WHERE f.low=?1 OR f.high=?1 ORDER BY f.created_at DESC"
+  ).bind(user.id).all();
+  const unread = Object.create(null);
+  const counts = await env.DB.prepare("SELECT sender,COUNT(*) AS n FROM messages WHERE (low=?1 OR high=?1) AND sender!=?1 AND read=0 GROUP BY sender").bind(user.id).all();
+  for (const row of counts.results) unread[row.sender] = row.n;
+  const out = {now:stamp, friends:[], incoming:[], outgoing:[], unread};
+  for (const row of results) {
+    if (row.status === "accepted") {
+      const online = !row.invisible && row.seen_at > stamp - ONLINE_FOR;
+      let listening = null;
+      if (online && row.listening) { try { listening = JSON.parse(row.listening); } catch {} }
+      out.friends.push({...person(row), online, listening, last_seen:row.invisible ? null : row.seen_at || null});
+    } else if (row.requester === user.id) out.outgoing.push(person(row));
+    else out.incoming.push(person(row));
+  }
+  return out;
+}
+function listeningState(input) {
+  if (input === null || input === undefined) return null;
+  if (typeof input !== "object" || Array.isArray(input)) throw new HttpError(400, "Invalid listening state.");
+  const number = (value, max) => Number.isFinite(value) && value >= 0 ? Math.min(value, max) : 0;
+  const title = str(input.title).trim().slice(0, 200);
+  if (!title) return null;
+  return {title, artist:str(input.artist).trim().slice(0, 200),
+    cover:/^https:\/\//i.test(str(input.cover)) ? input.cover.slice(0, 2048) : null,
+    duration:number(input.duration, 86_400), position:number(input.position, 86_400), playing:input.playing === true, at:now()};
+}
+async function socialRoute(request, env, user, path, url) {
+  if (path === "/social" && request.method === "GET") return reply(await socialSnapshot(env, user));
+  if (path === "/presence" && request.method === "PUT") {
+    await rate(env, request, "presence", 400, user.id);
+    const body = await json(request, 4096);
+    const listening = listeningState(body.listening);
+    await env.DB.prepare("INSERT INTO presence(user_id,invisible,seen_at,listening) VALUES (?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET invisible=excluded.invisible,seen_at=excluded.seen_at,listening=excluded.listening")
+      .bind(user.id, body.invisible === true ? 1 : 0, now(), listening && JSON.stringify(listening)).run();
+    return reply({ok:true});
+  }
+  if (path === "/friends/request" && request.method === "POST") {
+    await rate(env, request, "friend", 20, user.id);
+    const username = str((await json(request)).username).trim().replace(/^@/, "").toLowerCase();
+    if (!/^[a-z0-9_]{3,24}$/.test(username)) throw new HttpError(400, "Enter a username, 3–24 letters, numbers or underscores.");
+    const other = await env.DB.prepare("SELECT id,display_name FROM users WHERE username=?").bind(username).first();
+    if (!other) throw new HttpError(404, "Nobody has that username.");
+    if (other.id === user.id) throw new HttpError(400, "That is your own username.");
+    const existing = await friendship(env, user.id, other.id);
+    if (existing?.status === "accepted") throw new HttpError(409, "You are already friends.");
+    if (existing && existing.requester === user.id) throw new HttpError(409, "Friend request already sent.");
+    const [low, high] = pairOf(user.id, other.id);
+    if (existing) {
+      await env.DB.prepare("UPDATE friendships SET status='accepted' WHERE low=? AND high=?").bind(low, high).run();
+      return reply({ok:true, accepted:true, name:other.display_name});
+    }
+    await env.DB.prepare("INSERT INTO friendships(low,high,requester,status,created_at) VALUES (?,?,?,'pending',?)").bind(low, high, user.id, now()).run();
+    return reply({ok:true, accepted:false, name:other.display_name});
+  }
+  const friendAction = path.match(/^\/friends\/(accept|decline)$/);
+  if (friendAction && request.method === "POST") {
+    const id = str((await json(request)).id);
+    if (!uuidPattern.test(id)) throw new HttpError(404, "Not found.");
+    const [low, high] = pairOf(user.id, id);
+    if (friendAction[1] === "accept") {
+      const row = await env.DB.prepare("UPDATE friendships SET status='accepted' WHERE low=? AND high=? AND status='pending' AND requester!=? RETURNING low").bind(low, high, user.id).first();
+      if (!row) throw new HttpError(404, "That request is gone.");
+    } else {
+      await env.DB.prepare("DELETE FROM friendships WHERE low=? AND high=? AND status='pending'").bind(low, high).run();
+    }
+    return reply({ok:true});
+  }
+  const removal = path.match(/^\/friends\/([0-9a-f-]{36})$/);
+  if (removal && request.method === "DELETE") {
+    if (!uuidPattern.test(removal[1])) throw new HttpError(404, "Not found.");
+    const [low, high] = pairOf(user.id, removal[1]);
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM friendships WHERE low=? AND high=?").bind(low, high),
+      env.DB.prepare("DELETE FROM messages WHERE low=? AND high=?").bind(low, high),
+    ]);
+    return reply({ok:true});
+  }
+  const chat = path.match(/^\/messages\/([0-9a-f-]{36})$/);
+  if (chat) {
+    await requireFriend(env, user.id, chat[1]);
+    const [low, high] = pairOf(user.id, chat[1]);
+    if (request.method === "GET") {
+      const after = Number.parseInt(url.searchParams.get("after") || "0", 10) || 0;
+      const {results} = await env.DB.prepare("SELECT id,sender,body,created_at FROM messages WHERE low=? AND high=? AND id>? ORDER BY id DESC LIMIT 100").bind(low, high, after).all();
+      if (url.searchParams.get("read") === "1") {
+        await env.DB.prepare("UPDATE messages SET read=1 WHERE low=? AND high=? AND sender=? AND read=0").bind(low, high, chat[1]).run();
+      }
+      return reply({messages:results.reverse().map((m) => ({id:m.id, mine:m.sender === user.id, body:m.body, at:m.created_at}))});
+    }
+    if (request.method === "POST") {
+      await rate(env, request, "message", 150, user.id);
+      const body = str((await json(request, 4096)).body).replace(/\r\n/g, "\n").trim();
+      if (!body || body.length > 1000) throw new HttpError(400, "Write a message up to 1000 characters.");
+      const row = await env.DB.prepare("INSERT INTO messages(low,high,sender,body,created_at) VALUES (?,?,?,?,?) RETURNING id,created_at").bind(low, high, user.id, body, now()).first();
+      return reply({id:row.id, mine:true, body, at:row.created_at});
+    }
+  }
+  return null;
+}
 async function route(request, env, ctx) {
   const url = new URL(request.url);
   if (!url.pathname.startsWith(PREFIX+"/")) throw new HttpError(404,"Not found.");
@@ -402,8 +523,11 @@ async function route(request, env, ctx) {
   if (request.method==="POST" && path==="/google/pickup") return googlePickup(request,env);
   if (request.method==="GET" && path==="/google/callback") return googleCallback(url,env);
   if (request.method==="GET" && path.startsWith("/avatar/")) return avatar(path.slice(8),env);
+  if (request.method==="GET" && path.startsWith("/banner/")) return avatar(path.slice(8),env,"banners");
   if (request.method==="GET" && path==="/link/callback") return linkCallback(url,env);
   const {user,hash} = await authenticate(request,env);
+  const social = await socialRoute(request,env,user,path,url);
+  if (social) return social;
   if (path==="/links" && request.method==="GET") return reply(await linkList(env,user));
   const linkRoute = path.match(/^\/link\/(google|spotify)(?:\/(start|token))?$/);
   if (linkRoute) {
@@ -450,6 +574,25 @@ async function route(request, env, ctx) {
     const [, update] = await env.DB.batch([
       env.DB.prepare("DELETE FROM avatars WHERE user_id=?").bind(user.id),
       env.DB.prepare("UPDATE users SET avatar_set=0,avatar_version=avatar_version+1 WHERE id=? RETURNING *").bind(user.id),
+    ]);
+    return reply({account:publicUser(update.results[0],env.PUBLIC_BASE)});
+  }
+  if (path==="/me/banner" && request.method==="PUT") {
+    await rate(env, request, "banner", 20, user.id);
+    const type = (request.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    const data = await bytes(request, 400_000);
+    if (!data.length || !imageMatches(type, data)) throw new HttpError(400,"Use a JPEG, PNG or WebP image under 400 KB.");
+    const [, update] = await env.DB.batch([
+      env.DB.prepare("INSERT INTO banners(user_id,content_type,data) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET content_type=excluded.content_type,data=excluded.data")
+        .bind(user.id,type,data.buffer),
+      env.DB.prepare("UPDATE users SET banner_set=1,banner_version=banner_version+1 WHERE id=? RETURNING *").bind(user.id),
+    ]);
+    return reply({account:publicUser(update.results[0],env.PUBLIC_BASE)});
+  }
+  if (path==="/me/banner" && request.method==="DELETE") {
+    const [, update] = await env.DB.batch([
+      env.DB.prepare("DELETE FROM banners WHERE user_id=?").bind(user.id),
+      env.DB.prepare("UPDATE users SET banner_set=0,banner_version=banner_version+1 WHERE id=? RETURNING *").bind(user.id),
     ]);
     return reply({account:publicUser(update.results[0],env.PUBLIC_BASE)});
   }

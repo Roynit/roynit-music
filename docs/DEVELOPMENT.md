@@ -11,7 +11,7 @@ cargo build --release --locked --features desktop --bins --example shuffle_queue
 
 Ignored integration tests require network access, media helpers and a native audio device. Run explicitly with `--include-ignored --test-threads=1`. Audio tests are muted. Personal accounts and browser cookies are never used automatically by tests. `examples/soak_audit.rs` accepts a duration in seconds for controlled large-library/native playback stress tests; it does not certify long-term stability.
 
-`riff.exe` is the headless host: one JSON request per stdin line, JSON responses/events on stdout. Keep stdin open during playback; `--request` runs one command and exits. Start with `{"command":"capabilities"}`. Hosts keep Engine on a worker and call tick regularly. Slow operations use job.submit and queued/running/completed/failed/cancelled states. New playback requests supersede pending playback. Preserve recording identity, duration verification and stale-result checks.
+`roy.exe` is the headless host: one JSON request per stdin line, JSON responses/events on stdout. Keep stdin open during playback; `--request` runs one command and exits. Start with `{"command":"capabilities"}`. Hosts keep Engine on a worker and call tick regularly. Slow operations use job.submit and queued/running/completed/failed/cancelled states. New playback requests supersede pending playback. Preserve recording identity, duration verification and stale-result checks.
 
 The desktop uses egui and Windows SMTC. Preserve source disclosure, real Connecting/Buffering/Playing states, cancellation, keyboard/accessibility and the existing data location. UI polish must not introduce mock results or an Audio Studio editor.
 

@@ -143,3 +143,80 @@ test("linking Google and Spotify keeps refresh tokens on the server", async (t) 
   assert.match(revoked.error, /Link the account again/);
   assert.deepEqual((await request("/links", "GET", undefined, user.token)).links, []);
 });
+
+test("friends, presence and direct messages", async () => {
+  const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
+  const password = "local-" + crypto.randomUUID();
+  const make = (tag) => request("/register", "POST", { email: tag + nonce + "@example.test", username: tag + "_" + nonce, password });
+  const [a, b, c] = [await make("fa"), await make("fb"), await make("fc")];
+  const name = (user) => user.account.username;
+
+  await request("/friends/request", "POST", { username: name(a) }, a.token, 400);
+  await request("/friends/request", "POST", { username: "nobody_" + nonce }, a.token, 404);
+  await request("/friends/request", "POST", { username: name(b) }, a.token);
+  await request("/friends/request", "POST", { username: name(b) }, a.token, 409);
+  assert.equal((await request("/social", "GET", undefined, a.token)).outgoing.length, 1);
+  const incoming = (await request("/social", "GET", undefined, b.token)).incoming;
+  assert.deepEqual(incoming.map((p) => p.id), [a.account.id]);
+  // Nothing can be sent or read before the request is accepted.
+  await request("/messages/" + a.account.id, "POST", { body: "hi" }, b.token, 403);
+  await request("/friends/accept", "POST", { id: b.account.id }, a.token, 404);
+  await request("/friends/accept", "POST", { id: a.account.id }, b.token);
+  assert.equal((await request("/social", "GET", undefined, a.token)).friends[0].id, b.account.id);
+
+  // Presence: offline until a heartbeat, then online with the track; invisible hides it again.
+  assert.equal((await request("/social", "GET", undefined, a.token)).friends[0].online, false);
+  const song = { title: "Genius", artist: "Ravyn Lenae", cover: "https://example.test/c.jpg", duration: 156, position: 54, playing: true };
+  await request("/presence", "PUT", { listening: song }, b.token);
+  let seen = (await request("/social", "GET", undefined, a.token)).friends[0];
+  assert.equal(seen.online, true);
+  assert.equal(seen.listening.title, "Genius");
+  await request("/presence", "PUT", { invisible: true, listening: song }, b.token);
+  seen = (await request("/social", "GET", undefined, a.token)).friends[0];
+  assert.equal(seen.online, false);
+  assert.equal(seen.listening, null);
+  await request("/presence", "PUT", { listening: "x" }, b.token, 400);
+
+  // Messages: ordered, marked read when opened, limited in size, and private to the pair.
+  await request("/messages/" + b.account.id, "POST", { body: "hello  " }, a.token);
+  await request("/messages/" + b.account.id, "POST", { body: "again" }, a.token);
+  await request("/messages/" + b.account.id, "POST", { body: " " }, a.token, 400);
+  await request("/messages/" + b.account.id, "POST", { body: "x".repeat(1001) }, a.token, 400);
+  assert.equal((await request("/social", "GET", undefined, b.token)).unread[a.account.id], 2);
+  const thread = (await request("/messages/" + a.account.id + "?read=1", "GET", undefined, b.token)).messages;
+  assert.deepEqual(thread.map((m) => [m.body, m.mine]), [["hello", false], ["again", false]]);
+  assert.equal((await request("/social", "GET", undefined, b.token)).unread[a.account.id], undefined);
+  const later = (await request("/messages/" + a.account.id + "?after=" + thread[0].id, "GET", undefined, b.token)).messages;
+  assert.deepEqual(later.map((m) => m.body), ["again"]);
+  await request("/messages/" + a.account.id, "GET", undefined, c.token, 403);
+
+  // A request from the other side accepts straight away; removing a friend clears the chat.
+  await request("/friends/request", "POST", { username: name(c) }, a.token);
+  assert.equal((await request("/friends/request", "POST", { username: name(a) }, c.token)).accepted, true);
+  await request("/friends/decline", "POST", { id: c.account.id }, a.token);
+  await request("/friends/" + b.account.id, "DELETE", undefined, a.token);
+  assert.equal((await request("/social", "GET", undefined, a.token)).friends.some((p) => p.id === b.account.id), false);
+  await request("/messages/" + b.account.id, "GET", undefined, a.token, 403);
+});
+
+test("profile cover picture", async () => {
+  const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
+  const password = "local-" + crypto.randomUUID();
+  const a = await request("/register", "POST", { email: nonce + "@example.test", username: "c_" + nonce, password });
+  const b = await request("/register", "POST", { email: "d_" + nonce + "@example.test", username: "d_" + nonce, password });
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  const put = (type, body, token) => fetch(base + "/me/banner", { method: "PUT", headers: { "content-type": type, authorization: "Bearer " + token }, body });
+  assert.equal(a.account.banner_url, null);
+  assert.equal((await put("image/png", Buffer.from("not an image"), a.token)).status, 400);
+  assert.equal((await put("image/png", Buffer.alloc(410_000, 1), a.token)).status, 413);
+  const stored = await (await put("image/png", png, a.token)).json();
+  assert.match(stored.account.banner_url, /\/banner\/[0-9a-f-]{36}\?v=1$/);
+  const image = await fetch(stored.account.banner_url.replace("https://roynit.dangz.org/api/account", base));
+  assert.deepEqual(Buffer.from(await image.arrayBuffer()), png);
+  // Friends see the cover version, strangers see nothing of the account.
+  await request("/friends/request", "POST", { username: a.account.username }, b.token);
+  await request("/friends/accept", "POST", { id: b.account.id }, a.token);
+  assert.equal((await request("/social", "GET", undefined, b.token)).friends[0].banner_version, 1);
+  assert.equal((await request("/me/banner", "DELETE", undefined, a.token)).account.banner_url, null);
+  assert.equal((await fetch(stored.account.banner_url.replace("https://roynit.dangz.org/api/account", base))).status, 404);
+});

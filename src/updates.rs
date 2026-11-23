@@ -44,7 +44,7 @@ pub fn validate_repo(repo: &str) -> Result<()> {
     );
     ensure!(
         !repo.eq_ignore_ascii_case("rootscripts/riff"),
-        "Original Riff releases contain Electron builds; configure a Rust release repository"
+        "Updates need a Roy Music release repository"
     );
     Ok(())
 }

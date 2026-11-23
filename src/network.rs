@@ -43,7 +43,7 @@ impl Config {
         let mut builder = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent(concat!(
-                "RiffRust/",
+                "RoyMusic/",
                 env!("CARGO_PKG_VERSION"),
                 " (music player)"
             ));

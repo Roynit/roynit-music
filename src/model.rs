@@ -196,11 +196,33 @@ pub struct Library {
     pub schema_version: u32,
     pub tracks: BTreeMap<String, Track>,
     pub playlists: BTreeMap<String, Playlist>,
+    /// The order playlists are shown in; ones missing here (new or imported) follow, sorted by name.
+    pub playlist_order: Vec<String>,
     pub favorites: Vec<String>,
     pub history: Vec<PlayEvent>,
     pub queue: Queue,
     pub effects: Effects,
     pub settings: BTreeMap<String, Value>,
+}
+impl Library {
+    /// Playlists in the order the listener arranged them, then any others by name.
+    pub fn ordered_playlists(&self) -> Vec<&Playlist> {
+        let mut seen = std::collections::HashSet::new();
+        let mut list: Vec<&Playlist> = self
+            .playlist_order
+            .iter()
+            .filter_map(|id| self.playlists.get(id))
+            .filter(|p| seen.insert(p.id.as_str()))
+            .collect();
+        let mut rest: Vec<&Playlist> = self
+            .playlists
+            .values()
+            .filter(|p| !seen.contains(p.id.as_str()))
+            .collect();
+        rest.sort_by_cached_key(|p| p.name.to_lowercase());
+        list.extend(rest);
+        list
+    }
 }
 impl Default for Library {
     fn default() -> Self {
@@ -208,11 +230,43 @@ impl Default for Library {
             schema_version: 1,
             tracks: BTreeMap::new(),
             playlists: BTreeMap::new(),
+            playlist_order: vec![],
             favorites: vec![],
             history: vec![],
             queue: Queue::default(),
             effects: Effects::default(),
             settings: BTreeMap::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+
+    fn library(names: &[(&str, &str)], order: &[&str]) -> Library {
+        let mut library = Library::default();
+        for (id, name) in names {
+            library.playlists.insert(
+                (*id).into(),
+                Playlist { id: (*id).into(), name: (*name).into(), tracks: vec![] },
+            );
+        }
+        library.playlist_order = order.iter().map(|id| (*id).to_owned()).collect();
+        library
+    }
+
+    #[test]
+    fn playlists_follow_the_chosen_order_then_new_ones_by_name() {
+        let library = library(&[("a", "Zed"), ("b", "Beta"), ("c", "Alpha"), ("d", "Delta")], &["b", "a"]);
+        let ids: Vec<_> = library.ordered_playlists().iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["b", "a", "c", "d"], "chosen first, then Alpha, Delta");
+    }
+
+    #[test]
+    fn unknown_and_repeated_ids_in_the_order_are_ignored() {
+        let library = library(&[("a", "A"), ("b", "B")], &["gone", "b", "b", "a"]);
+        let ids: Vec<_> = library.ordered_playlists().iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["b", "a"]);
     }
 }

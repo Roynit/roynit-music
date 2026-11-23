@@ -1,4 +1,4 @@
-//! Public Spotify embed + guest Pathfinder, matching the original Riff import flow.
+//! Public Spotify embed + guest Pathfinder.
 //! Guest tokens come only from public pages, stay in RAM and are never exported.
 use crate::{jobs, model::Track};
 use anyhow::{Context, Result, ensure};

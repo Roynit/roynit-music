@@ -75,6 +75,8 @@ enum Action {
     Save,
     Avatar,
     AvatarRemove,
+    Banner,
+    BannerRemove,
     SignOut,
     ReadMusic,
     WriteMusic,
@@ -242,6 +244,16 @@ impl State {
         self.notice(text, error);
     }
 
+    /// The server address and the session token, while somebody is signed in.
+    pub(super) fn session(&self) -> (&str, Option<&str>) {
+        let token = if self.profile.is_null() { None } else { self.token.as_deref() };
+        (&self.endpoint, token)
+    }
+
+    pub(super) fn username(&self) -> &str {
+        self.profile["username"].as_str().unwrap_or_default()
+    }
+
     pub fn name(&self) -> &str {
         self.profile["display_name"].as_str().unwrap_or("Listener")
     }
@@ -268,6 +280,8 @@ impl State {
             Action::Save => (reqwest::Method::PATCH, "/me".to_owned(), true),
             Action::Avatar => (reqwest::Method::PUT, "/me/avatar".to_owned(), true),
             Action::AvatarRemove => (reqwest::Method::DELETE, "/me/avatar".to_owned(), true),
+            Action::Banner => (reqwest::Method::PUT, "/me/banner".to_owned(), true),
+            Action::BannerRemove => (reqwest::Method::DELETE, "/me/banner".to_owned(), true),
             Action::SignOut => (reqwest::Method::POST, "/logout".to_owned(), true),
             Action::ReadMusic => (reqwest::Method::GET, "/music".to_owned(), true),
             Action::WriteMusic => (reqwest::Method::PUT, "/music".to_owned(), true),
@@ -376,6 +390,26 @@ impl State {
         ))
     }
 
+    /// Where this account's cover picture is served from, like the avatar's address.
+    fn banner_uri(&self) -> Option<String> {
+        let version = self.profile["banner_url"].as_str()?.rsplit_once("?v=")?.1.to_owned();
+        version.bytes().all(|b| b.is_ascii_digit()).then_some(())?;
+        Some(format!("{}/banner/{}?v={version}", self.endpoint, self.profile["id"].as_str()?))
+    }
+
+    fn choose_banner(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Pictures", &["jpg", "jpeg", "png", "webp"])
+            .pick_file()
+        else {
+            return;
+        };
+        match prepare_banner(&path) {
+            Ok(bytes) => self.request_with(Action::Banner, Value::Null, Some(bytes)),
+            Err(error) => self.notice(error, true),
+        }
+    }
+
     fn choose_avatar(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Pictures", &["jpg", "jpeg", "png", "webp"])
@@ -442,7 +476,11 @@ impl State {
                                     self.notice("Could not open Google sign-in.", true);
                                 }
                             }
-                            Action::Save | Action::Avatar | Action::AvatarRemove => {
+                            Action::Save
+                            | Action::Avatar
+                            | Action::AvatarRemove
+                            | Action::Banner
+                            | Action::BannerRemove => {
                                 self.profile = data["account"].clone();
                                 self.sync_fields();
                                 if action == Action::Save {
@@ -452,6 +490,8 @@ impl State {
                                     match action {
                                         Action::Save => "Profile updated.",
                                         Action::Avatar => "Profile picture updated.",
+                                        Action::Banner => "Cover picture updated.",
+                                        Action::BannerRemove => "Cover picture removed.",
                                         _ => "Profile picture removed.",
                                     },
                                     false,
@@ -702,6 +742,33 @@ fn prepare_avatar(path: &std::path::Path) -> Result<Vec<u8>, String> {
         .encode_image(&square)
         .map_err(|_| "Could not prepare that picture.".to_owned())?;
     Ok(out)
+}
+
+/// Crop to a wide 3:1 strip, shrink to 960 px and re-encode, so the cover stays small and fits any card.
+fn prepare_banner(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    if std::fs::metadata(path).map_err(|_| "Could not read that file.")?.len() > 25_000_000 {
+        return Err("Choose a picture under 25 MB.".into());
+    }
+    let picture = image::open(path).map_err(|_| "That file is not a supported picture.".to_owned())?;
+    let (w, h) = (picture.width(), picture.height());
+    if w == 0 || h == 0 {
+        return Err("That picture is empty.".into());
+    }
+    let (cw, ch) = if w > h * 3 { (h * 3, h) } else { (w, w / 3) };
+    let strip = picture
+        .crop_imm((w - cw) / 2, (h - ch) / 2, cw.max(1), ch.max(1))
+        .resize_exact(960, 320, image::imageops::FilterType::Lanczos3)
+        .to_rgb8();
+    for quality in [86, 74, 60] {
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality)
+            .encode_image(&strip)
+            .map_err(|_| "Could not prepare that picture.".to_owned())?;
+        if out.len() <= 380_000 {
+            return Ok(out);
+        }
+    }
+    Err("That picture is too detailed. Try a simpler one.".into())
 }
 
 /// A steady colour per name, used behind initials and in the profile header.
@@ -1001,6 +1068,27 @@ impl App {
                 ui.label(RichText::new("Profile details").size(24.).bold());
                 ui.add_space(18.);
                 ui.add_enabled_ui(account.pending.is_none(), |ui| {
+                    let (cover, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 110.), egui::Sense::click());
+                    ui.painter().rect_filled(cover, 10, tint_for(account.name()));
+                    if let Some(uri) = account.banner_uri() {
+                        App::paint_cover(ui, cover, &uri, 10);
+                    }
+                    let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.15);
+                    ui.painter().rect_filled(cover, 10, Color32::from_black_alpha((120. * hover) as u8));
+                    ui.painter().text(
+                        cover.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Change cover",
+                        egui::FontId::proportional(15.),
+                        Color32::from_white_alpha((255. * hover) as u8),
+                    );
+                    if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        account.choose_banner();
+                    }
+                    if account.banner_uri().is_some() && ui.small_button("Remove cover").clicked() {
+                        account.request(Action::BannerRemove, Value::Null);
+                    }
+                    ui.add_space(8.);
                     ui.horizontal(|ui| {
                         if avatar(ui, account, 128., true).clicked() {
                             account.choose_avatar();
@@ -1407,5 +1495,25 @@ mod tests {
         assert_eq!((decoded.width(), decoded.height()), (256, 256));
         std::fs::write(dir.path().join("x.txt"), "no").unwrap();
         assert!(prepare_avatar(&dir.path().join("x.txt")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod banner_tests {
+    use super::prepare_banner;
+
+    #[test]
+    fn any_picture_becomes_a_small_wide_cover() {
+        let path = std::env::temp_dir().join(format!("roy-banner-{}.png", std::process::id()));
+        for (w, h) in [(1000, 1000), (3000, 500), (200, 900)] {
+            image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x % 251) as u8, (y % 241) as u8, 90]))
+                .save(&path)
+                .unwrap();
+            let bytes = prepare_banner(&path).unwrap();
+            let cover = image::load_from_memory(&bytes).unwrap();
+            assert_eq!((cover.width(), cover.height()), (960, 320), "{w}x{h}");
+            assert!(bytes.len() < 380_000);
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }
