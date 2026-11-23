@@ -1,3 +1,8 @@
+# Roy Music 0.1.8
+
+- Mixes for you now builds playlists from your taste, the way YouTube does: "Made for you", "On repeat" (what you play and love most), "Discover" (new artists near your taste) and "Because you liked ..." mixes built around songs you hearted. A heart counts far more than a play. Mixes hold up to 40 songs.
+- Each mix has a visible + to add it to your playlists (a check once it is there), next to the options menu.
+
 # Roy Music 0.1.7
 
 - Playback starts in about 0.2 s instead of 3-6 s on many songs. YouTube refused the whole-file request FFmpeg makes for larger tracks, which forced a slow fallback; Roy Music now relays it in small ranges. Stream links are also prepared in advance for the songs on your home page, and the connection is warmed when the app opens.

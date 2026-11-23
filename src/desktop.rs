@@ -6207,7 +6207,9 @@ impl App {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 14.;
                 for mix in chunk {
-                    let cover = mix.tracks.iter().find_map(|t| t.cover.as_deref());
+                    // Made-for-you and Discover often share a top song; Discover shows a later one so the cards differ.
+                    let skip = if mix.name == riff_core::mixes::DISCOVER { 2 } else { 0 };
+                    let cover = mix.tracks.iter().skip(skip).find_map(|t| t.cover.as_deref());
                     let artists: Vec<_> = mix
                         .tracks
                         .iter()
@@ -6231,6 +6233,28 @@ impl App {
                     );
                     let mut save = false;
                     let mut view = open;
+                    let saved = self.library.playlists.values().any(|p| p.name == mix.name);
+                    {
+                        // A visible "add to my playlists" next to the options menu.
+                        let plus = egui::Rect::from_min_size(
+                            egui::pos2(rect.right() - 90., rect.top() + 18.),
+                            egui::vec2(34., 28.),
+                        );
+                        let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(plus));
+                        let label = if saved { "Already in your playlists" } else { "Add to your playlists" };
+                        let button = ui.add_enabled(
+                            !saved,
+                            egui::Button::new(
+                                RichText::new(if saved { "✓" } else { "+" }).size(18.).color(Color32::WHITE),
+                            )
+                            .fill(Color32::from_black_alpha(190))
+                            .corner_radius(8)
+                            .min_size(egui::vec2(34., 28.)),
+                        );
+                        if button.on_hover_text(label).on_disabled_hover_text(label).clicked() {
+                            save = true;
+                        }
+                    }
                     {
                         let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(corner));
                         let menu =

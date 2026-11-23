@@ -7,10 +7,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Mix {
     pub name: String,
     pub tracks: Vec<Track>,
+    /// The song this mix was built around, when there is one.
+    #[serde(default)]
+    pub seed: String,
 }
 
 /// What the listening history says about this person: who to seed mixes from, which artists they
@@ -19,6 +22,8 @@ pub struct Mix {
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct Taste {
     pub seeds: Vec<Track>,
+    /// Your most-played and most-loved songs right now, for the "On repeat" mix.
+    pub rotation: Vec<Track>,
     pub affinity: HashMap<String, f32>,
     pub recent: HashSet<String>,
     pub favorites: HashSet<String>,
@@ -49,7 +54,8 @@ pub(crate) fn taste(library: &Library, now: u64) -> Taste {
     }
     let favorites: HashSet<String> = library.favorites.iter().cloned().collect();
     for id in &library.favorites {
-        *scores.entry(id).or_default() += 1.5;
+        // A heart is the clearest signal there is: worth several plays, and it does not fade.
+        *scores.entry(id).or_default() += 5.;
     }
     let mut affinity = HashMap::<String, f32>::new();
     let mut ranked: Vec<(f32, &Track)> = scores
@@ -70,6 +76,12 @@ pub(crate) fn taste(library: &Library, now: u64) -> Taste {
     ranked.sort_by(|(a_score, a), (b_score, b)| {
         b_score.total_cmp(a_score).then_with(|| a.id.cmp(&b.id))
     });
+    let rotation: Vec<Track> = ranked
+        .iter()
+        .filter(|(_, track)| crate::youtube_stream::video_id(&track.source).is_some())
+        .take(24)
+        .map(|(_, track)| (*track).clone())
+        .collect();
     let mut artists = HashSet::new();
     let seeds = ranked
         .into_iter()
@@ -81,7 +93,7 @@ pub(crate) fn taste(library: &Library, now: u64) -> Taste {
     for value in affinity.values_mut() {
         *value /= top;
     }
-    Taste { seeds, affinity, recent, favorites }
+    Taste { seeds, rotation, affinity, recent, favorites }
 }
 
 pub(crate) fn generate(music: &Music<'_>, seeds: &[Track]) -> Result<Vec<Mix>> {
@@ -137,6 +149,7 @@ fn build_with(music: &Music<'_>, seed: &Track, size: usize) -> Result<Mix> {
     Ok(Mix {
         name: format!("{name} Mix"),
         tracks,
+        seed: seed.id.clone(),
     })
 }
 
@@ -152,8 +165,9 @@ pub(crate) fn picks(mixes: &[Mix]) -> Vec<&Track> {
         .collect()
 }
 
-pub(crate) const FOR_YOU: &str = "Made for you";
-pub(crate) const DISCOVER: &str = "Discover";
+pub const FOR_YOU: &str = "Made for you";
+pub const DISCOVER: &str = "Discover";
+pub const ON_REPEAT: &str = "On repeat";
 
 /// Every radio votes: a song that several of your seeds lead to ranks above one that only one of them
 /// does. Artists you play a lot get a boost, what you heard in the last days is held back, and
@@ -223,15 +237,15 @@ pub(crate) fn blend(mixes: &[Mix], taste: &Taste) -> Vec<Mix> {
     [(FOR_YOU, take(false)), (DISCOVER, take(true))]
         .into_iter()
         .filter(|(_, tracks)| tracks.len() >= 6)
-        .map(|(name, tracks)| Mix { name: name.into(), tracks })
+        .map(|(name, tracks)| Mix { name: name.into(), tracks, ..Default::default() })
         .collect()
 }
 
 pub(crate) fn validate_tracks(value: &Value) -> Result<Vec<Track>> {
     let tracks: Vec<Track> = serde_json::from_value(value.clone())?;
     ensure!(
-        (1..=24).contains(&tracks.len()),
-        "Mix must contain 1–24 tracks"
+        (1..=60).contains(&tracks.len()),
+        "Mix must contain 1–60 tracks"
     );
     ensure!(
         tracks.iter().all(|track| !track.id.is_empty()
@@ -292,6 +306,7 @@ pub(crate) fn account_mixes(
                         generated.push(Mix {
                             name: title.into(),
                             tracks,
+                            ..Default::default()
                         });
                     }
                 }
@@ -311,7 +326,22 @@ pub(crate) fn account_mixes(
     };
     crate::jobs::check_cancelled()?;
     let generated_count = generated.len();
-    let blended = blend(&mixes, taste);
+    // Radios built around a song you hearted read "Because you liked …", like YouTube's own.
+    for mix in &mut mixes {
+        if taste.favorites.contains(&mix.seed)
+            && let Some(seed) = taste.seeds.iter().find(|t| t.id == mix.seed)
+        {
+            mix.name = format!("Because you liked {}", seed.title);
+        }
+    }
+    let mut blended = blend(&mixes, taste);
+    if taste.rotation.len() >= 8 {
+        let at = blended.iter().position(|m| m.name == DISCOVER).unwrap_or(blended.len());
+        blended.insert(
+            at,
+            Mix { name: ON_REPEAT.into(), tracks: taste.rotation.clone(), ..Default::default() },
+        );
+    }
     mixes.extend(generated);
     mixes.splice(0..0, blended);
     Ok(serde_json::json!({
@@ -503,6 +533,7 @@ mod taste_tests {
         let mix = |name: &str, ids: &[(&str, &str)]| Mix {
             name: name.into(),
             tracks: ids.iter().map(|(id, artist)| track(id, artist)).collect(),
+            ..Default::default()
         };
         let shared = ("shared", "Newcomer");
         let m1 = mix("one", &[shared, ("a1", "Known"), ("a2", "Known"), ("a3", "Fresh1"), ("a4", "Fresh2"), ("a5", "Fresh3")]);
@@ -515,5 +546,21 @@ mod taste_tests {
         let discover = blended.iter().find(|m| m.name == DISCOVER).unwrap();
         assert!(discover.tracks.iter().all(|t| t.artist != "Known"));
         assert!(discover.tracks.len() <= 24 && for_you.tracks.len() <= 24);
+    }
+
+    #[test]
+    fn a_hearted_song_outweighs_several_plays_of_another() {
+        let library = library(
+            &[
+                ("loved", "A", NOW - 20 * 86_400),
+                ("played", "B", NOW - 6 * 3600),
+                ("played", "B", NOW - 4 * 3600),
+                ("played", "B", NOW - 7200),
+            ],
+            &["loved"],
+        );
+        let taste = taste(&library, NOW);
+        assert_eq!(taste.seeds[0].id, "loved", "{:?}", taste.seeds.iter().map(|t| &t.id).collect::<Vec<_>>());
+        assert!(taste.affinity["a"] > taste.affinity["b"]);
     }
 }
