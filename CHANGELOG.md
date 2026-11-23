@@ -1,3 +1,7 @@
+# Roy Music 0.1.10
+
+- Far fewer "No verified recording matching ..." errors on Spotify and SoundCloud songs, remixes included. When the first search finds nothing playable, Roy Music now widens it: the lead artist alone, the bare title, accent-free spelling, and YouTube videos as well as songs. It also stops requiring every credited artist to match, accepts an artist named in the video title, and ignores accents. Wrong versions are still refused: a different artist, an original instead of a remix, a live cut, or a different length.
+
 # Roy Music 0.1.9
 
 - Fewer freezes while playing, and no long wait to resume: about twenty seconds of decoded sound is now kept ahead of the speakers (it was under a tenth of a second), the network side reads ahead on its own thread and retries a failed or slow request, and a stalled connection is given up after 8 seconds instead of 20.

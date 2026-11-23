@@ -164,30 +164,76 @@ impl Providers {
                 proxy: self.proxy.clone(),
             }
             .client()?;
-            let result = crate::youtube::Music {
+            let api = crate::youtube::Music {
                 client: &client,
                 cookies: self.cookies.as_ref(),
-            }
-            .search_filtered(&format!("{} {}", track.artist, track.title), "songs")?;
-            let candidates: Vec<Track> = serde_json::from_value(result["tracks"].clone())?;
-            let ranked = crate::spotify::ranked_matches(track, &candidates);
+            };
+            let queries = crate::spotify::match_queries(track);
+            let tracks_of = |result: Result<Value>| -> Vec<Track> {
+                result
+                    .ok()
+                    .and_then(|r| serde_json::from_value(r["tracks"].clone()).ok())
+                    .unwrap_or_default()
+            };
             let mut rejected = Vec::new();
-            for matched in ranked.into_iter().take(3) {
+            let mut tried = std::collections::HashSet::new();
+            // First the quick, exact search; only when it finds nothing playable, widen it: the lead artist
+            // alone, the bare title, and YouTube videos as well as songs (remix uploads are usually videos).
+            for stage in 0..2 {
+                let candidates: Vec<Track> = if stage == 0 {
+                    tracks_of(api.search_filtered(&queries[0], "songs"))
+                } else {
+                    let jobs: Vec<(String, bool)> = queries
+                        .iter()
+                        .flat_map(|q| [(q.clone(), true), (q.clone(), false)])
+                        .filter(|(q, songs)| !(*songs && *q == queries[0]))
+                        .collect();
+                    let token = crate::jobs::thread_cancel_token();
+                    let mut merged: Vec<Track> = std::thread::scope(|scope| {
+                        let workers: Vec<_> = jobs
+                            .iter()
+                            .map(|(q, songs)| {
+                                let (api, token) = (&api, token.clone());
+                                scope.spawn(move || {
+                                    if let Some(token) = token {
+                                        crate::jobs::set_thread_cancel_token(token);
+                                    }
+                                    if *songs {
+                                        api.search_filtered(q, "songs")
+                                    } else {
+                                        api.search(q)
+                                    }
+                                })
+                            })
+                            .collect();
+                        workers
+                            .into_iter()
+                            .flat_map(|w| tracks_of(w.join().unwrap_or_else(|_| Err(anyhow::anyhow!("search failed")))))
+                            .collect()
+                    });
+                    let mut seen = std::collections::HashSet::new();
+                    merged.retain(|t| seen.insert(t.id.clone()));
+                    merged
+                };
                 crate::jobs::check_cancelled()?;
-                match self.resolve(matched) {
-                    Ok(mut value) => {
-                        if let Err(error) = validate_match_duration(track, &value) {
-                            rejected.push(error.to_string());
-                            continue;
+                let ranked = crate::spotify::ranked_matches(track, &candidates);
+                for matched in ranked.into_iter().filter(|m| tried.insert(m.id.clone())).take(5) {
+                    crate::jobs::check_cancelled()?;
+                    match self.resolve(matched) {
+                        Ok(mut value) => {
+                            if let Err(error) = validate_match_duration(track, &value) {
+                                rejected.push(error.to_string());
+                                continue;
+                            }
+                            value["playback_source"] = json!(matched.source);
+                            value["matched_title"] = json!(matched.title);
+                            value["matched_artist"] = json!(matched.artist);
+                            value["requested_duration"] = json!(track.duration);
+                            value["verified_duration"] = json!(true);
+                            return Ok(value);
                         }
-                        value["playback_source"] = json!(matched.source);
-                        value["matched_title"] = json!(matched.title);
-                        value["matched_artist"] = json!(matched.artist);
-                        value["requested_duration"] = json!(track.duration);
-                        value["verified_duration"] = json!(true);
-                        return Ok(value);
+                        Err(error) => rejected.push(error.to_string()),
                     }
-                    Err(error) => rejected.push(error.to_string()),
                 }
             }
             anyhow::bail!(

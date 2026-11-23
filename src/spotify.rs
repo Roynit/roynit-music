@@ -134,12 +134,50 @@ pub fn library(client: &reqwest::blocking::Client, token: &str, kind: &str) -> R
         Ok(serde_json::json!({"kind":kind,"items":items}))
     }
 }
-fn words(text: &str) -> std::collections::HashSet<String> {
+/// Lower-case and drop accents, so "Lửa Dối" and "Lua Doi" are the same words (uploaders often skip them).
+fn fold(text: &str) -> String {
     text.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'à' | 'á' | 'ả' | 'ã' | 'ạ' | 'ă' | 'ằ' | 'ắ' | 'ẳ' | 'ẵ' | 'ặ' | 'â' | 'ầ' | 'ấ' | 'ẩ' | 'ẫ'
+            | 'ậ' | 'ä' | 'å' => 'a',
+            'è' | 'é' | 'ẻ' | 'ẽ' | 'ẹ' | 'ê' | 'ề' | 'ế' | 'ể' | 'ễ' | 'ệ' | 'ë' => 'e',
+            'ì' | 'í' | 'ỉ' | 'ĩ' | 'ị' | 'î' | 'ï' => 'i',
+            'ò' | 'ó' | 'ỏ' | 'õ' | 'ọ' | 'ô' | 'ồ' | 'ố' | 'ổ' | 'ỗ' | 'ộ' | 'ơ' | 'ờ' | 'ớ' | 'ở' | 'ỡ'
+            | 'ợ' | 'ö' => 'o',
+            'ù' | 'ú' | 'ủ' | 'ũ' | 'ụ' | 'ư' | 'ừ' | 'ứ' | 'ử' | 'ữ' | 'ự' | 'û' | 'ü' => 'u',
+            'ỳ' | 'ý' | 'ỷ' | 'ỹ' | 'ỵ' => 'y',
+            'đ' => 'd',
+            'ñ' => 'n',
+            'ç' => 'c',
+            'ß' => 's',
+            other => other,
+        })
+        .collect()
+}
+fn words(text: &str) -> std::collections::HashSet<String> {
+    fold(text)
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .collect()
+}
+/// How well the requested artists show up in the candidate. A track credited to several artists only needs
+/// one of them to be found, and the channel name or the video title may carry it (remix uploads usually do).
+fn artist_score(track: &Track, candidate: &Track) -> f64 {
+    let everyone = words(&track.artist);
+    let found = words(&candidate.artist);
+    let whole = everyone.intersection(&found).count() as f64 / everyone.len().max(1) as f64;
+    let pool: std::collections::HashSet<String> = found.union(&words(&candidate.title)).cloned().collect();
+    let named = track
+        .artist
+        .split([',', '&', ';', '/'])
+        .flat_map(|part| part.split(" x "))
+        .map(words)
+        .filter(|name| !name.is_empty())
+        .map(|name| name.intersection(&pool).count() as f64 / name.len() as f64)
+        .fold(0., f64::max);
+    whole.max(named * 0.8)
 }
 /// Compare arrangement and identity before resolving; unknown time is provisional only.
 pub fn match_score(track: &Track, candidate: &Track) -> Option<f64> {
@@ -165,12 +203,13 @@ pub fn match_score(track: &Track, candidate: &Track) -> Option<f64> {
     }
     let title = title_words(&track.title);
     let other = title_words(&candidate.title);
-    let artist = words(&track.artist);
-    let performers = words(&candidate.artist);
     let overlap = title.intersection(&other).count() as f64;
     let recall = overlap / title.len().max(1) as f64;
-    let precision = overlap / other.len().max(1) as f64;
-    let artist_score = artist.intersection(&performers).count() as f64 / artist.len().max(1) as f64;
+    // Uploads put the artist in the title ("Yan Linh - Lua Doi Remix"); those words are not extra baggage.
+    let credited = words(&track.artist);
+    let extra = other.iter().filter(|word| !credited.contains(*word)).count();
+    let precision = overlap / extra.max(1) as f64;
+    let artist_score = artist_score(track, candidate);
     if recall < 0.8 || precision < 0.45 || artist_score < 0.5 {
         return None;
     }
@@ -227,6 +266,26 @@ pub fn duration_matches(expected: f64, actual: f64) -> bool {
         && actual > 0.
         && (expected - actual).abs() <= duration_tolerance(expected)
 }
+/// Search phrases to try, most specific first: every artist, the lead artist, then the title alone.
+pub fn match_queries(track: &Track) -> Vec<String> {
+    let lead = track
+        .artist
+        .split([',', '&', ';', '/'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    let mut queries = vec![
+        format!("{} {}", track.artist, track.title),
+        format!("{lead} {}", track.title),
+        track.title.clone(),
+        format!("{lead} {}", fold(&track.title)),
+    ];
+    queries.retain(|q| !q.trim().is_empty());
+    let mut seen = std::collections::HashSet::new();
+    queries.retain(|q| seen.insert(q.trim().to_lowercase()));
+    queries
+}
 pub fn ranked_matches<'a>(track: &Track, candidates: &'a [Track]) -> Vec<&'a Track> {
     let mut scored: Vec<_> = candidates
         .iter()
@@ -238,4 +297,52 @@ pub fn ranked_matches<'a>(track: &Track, candidates: &'a [Track]) -> Vec<&'a Tra
 }
 pub fn best_match<'a>(track: &Track, candidates: &'a [Track]) -> Option<&'a Track> {
     ranked_matches(track, candidates).into_iter().next()
+}
+
+#[cfg(test)]
+mod match_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn track(title: &str, artist: &str, duration: f64) -> Track {
+        serde_json::from_value(json!({
+            "id": format!("{title}{artist}"), "title": title, "artist": artist,
+            "source": "https://music.youtube.com/watch?v=aaaaaaaaaaa", "platform": "youtube", "duration": duration
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn accents_do_not_stop_a_match() {
+        assert_eq!(words("Lửa Dối"), words("lua DOI"));
+        assert!(match_score(&track("Chúng Ta Của Hiện Tại", "Sơn Tùng M-TP", 301.), &track("Chung Ta Cua Hien Tai", "Son Tung M-TP", 302.)).is_some());
+    }
+
+    #[test]
+    fn one_credited_artist_is_enough_and_the_channel_or_title_may_carry_it() {
+        let wanted = track("Lửa Dối - Remix", "Yan Linh, H2O Vinahouse, BuiThanh", 205.);
+        // The official song lists only some of the artists...
+        assert!(match_score(&wanted, &track("Lừa Dối (Remix)", "Yan Linh", 205.)).is_some());
+        // ...and a video upload carries the artist in its title, under some channel's name.
+        assert!(match_score(&wanted, &track("Yan Linh - Lua Doi Remix | H2O Vinahouse", "Nhac Remix Channel", 0.)).is_some());
+    }
+
+    #[test]
+    fn a_different_artist_or_version_or_length_is_still_refused() {
+        let wanted = track("Lửa Dối - Remix", "Yan Linh, H2O Vinahouse, BuiThanh", 205.);
+        assert!(match_score(&wanted, &track("Lừa Dối Remix", "Someone Else", 205.)).is_none(), "other artist");
+        assert!(match_score(&wanted, &track("Lừa Dối", "Yan Linh", 205.)).is_none(), "the original is not the remix");
+        assert!(match_score(&wanted, &track("Lừa Dối (Remix)", "Yan Linh", 260.)).is_none(), "much longer");
+        let original = track("Earfquake", "Tyler, The Creator", 190.);
+        assert!(match_score(&original, &track("Earfquake (Live)", "Tyler, The Creator", 190.)).is_none(), "live version");
+    }
+
+    #[test]
+    fn searches_widen_from_every_artist_to_the_bare_title() {
+        let queries = match_queries(&track("Lửa Dối - Remix", "Yan Linh, H2O Vinahouse", 205.));
+        assert_eq!(queries[0], "Yan Linh, H2O Vinahouse Lửa Dối - Remix");
+        assert!(queries.contains(&"Yan Linh Lửa Dối - Remix".to_owned()));
+        assert!(queries.contains(&"Lửa Dối - Remix".to_owned()));
+        assert!(queries.len() >= 3);
+    }
 }
