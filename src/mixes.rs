@@ -13,43 +13,75 @@ pub struct Mix {
     pub tracks: Vec<Track>,
 }
 
-pub(crate) fn seeds(library: &Library, now: u64) -> Vec<Track> {
-    let mut scores = HashMap::<&str, u64>::new();
-    for event in library.history.iter().rev().take(150) {
-        let age_days = now.saturating_sub(event.started_at) / 86_400;
-        if age_days < 90 {
-            *scores.entry(&event.track_id).or_default() += 1 + 12 / (1 + age_days / 3);
+/// What the listening history says about this person: who to seed mixes from, which artists they
+/// favour, and what they just heard. Skips (a track cut off by the next one within half a minute) count
+/// against a track, repeats and recent plays count for it, and old plays fade with a three-week half-life.
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct Taste {
+    pub seeds: Vec<Track>,
+    pub affinity: HashMap<String, f32>,
+    pub recent: HashSet<String>,
+    pub favorites: HashSet<String>,
+}
+
+const SEEDS: usize = 6;
+
+fn artist_key(track: &Track) -> String {
+    let name = track.artist.trim().to_lowercase();
+    if name.is_empty() { track.id.clone() } else { name }
+}
+
+pub(crate) fn taste(library: &Library, now: u64) -> Taste {
+    let mut scores = HashMap::<&str, f32>::new();
+    let mut recent = HashSet::new();
+    let newest_first: Vec<_> = library.history.iter().rev().take(600).collect();
+    for (i, event) in newest_first.iter().enumerate() {
+        let age_days = now.saturating_sub(event.started_at) as f32 / 86_400.;
+        if age_days > 120. {
+            continue;
+        }
+        let recency = 0.5_f32.powf(age_days / 21.);
+        let skipped = i > 0 && newest_first[i - 1].started_at.saturating_sub(event.started_at) < 30;
+        *scores.entry(&event.track_id).or_default() += if skipped { -0.6 * recency } else { recency };
+        if age_days < 3. && !skipped {
+            recent.insert(event.track_id.clone());
         }
     }
+    let favorites: HashSet<String> = library.favorites.iter().cloned().collect();
     for id in &library.favorites {
-        *scores.entry(id).or_default() += 18;
+        *scores.entry(id).or_default() += 1.5;
     }
-    let mut ranked: Vec<_> = scores
+    let mut affinity = HashMap::<String, f32>::new();
+    let mut ranked: Vec<(f32, &Track)> = scores
         .into_iter()
         .filter_map(|(id, score)| {
             let track = library.tracks.get(id)?;
-            matches!(
-                track.platform.as_str(),
-                "youtube" | "ytmusic" | "spotify" | "catalog"
-            )
+            if score > 0. {
+                *affinity.entry(artist_key(track)).or_default() += score;
+            }
+            (score > 0.
+                && matches!(
+                    track.platform.as_str(),
+                    "youtube" | "ytmusic" | "spotify" | "catalog"
+                ))
             .then_some((score, track))
         })
         .collect();
-    ranked.sort_by(|(a_score, a), (b_score, b)| b_score.cmp(a_score).then_with(|| a.id.cmp(&b.id)));
+    ranked.sort_by(|(a_score, a), (b_score, b)| {
+        b_score.total_cmp(a_score).then_with(|| a.id.cmp(&b.id))
+    });
     let mut artists = HashSet::new();
-    ranked
+    let seeds = ranked
         .into_iter()
-        .filter(|(_, track)| {
-            let name = track.artist.trim().to_lowercase();
-            artists.insert(if name.is_empty() {
-                track.id.clone()
-            } else {
-                name
-            })
-        })
-        .take(3)
+        .filter(|(_, track)| artists.insert(artist_key(track)))
+        .take(SEEDS)
         .map(|(_, track)| track.clone())
-        .collect()
+        .collect();
+    let top = affinity.values().copied().fold(0., f32::max).max(1.);
+    for value in affinity.values_mut() {
+        *value /= top;
+    }
+    Taste { seeds, affinity, recent, favorites }
 }
 
 pub(crate) fn generate(music: &Music<'_>, seeds: &[Track]) -> Result<Vec<Mix>> {
@@ -63,7 +95,7 @@ pub(crate) fn generate(music: &Music<'_>, seeds: &[Track]) -> Result<Vec<Mix>> {
                     if let Some(token) = token {
                         crate::jobs::set_thread_cancel_token(token);
                     }
-                    build(music, seed)
+                    build_with(music, seed, 40)
                 })
             })
             .collect();
@@ -81,6 +113,10 @@ pub(crate) fn generate(music: &Music<'_>, seeds: &[Track]) -> Result<Vec<Mix>> {
 }
 
 pub(crate) fn build(music: &Music<'_>, seed: &Track) -> Result<Mix> {
+    build_with(music, seed, 24)
+}
+
+fn build_with(music: &Music<'_>, seed: &Track, size: usize) -> Result<Mix> {
     let video = if let Some(id) = crate::youtube_stream::video_id(&seed.source) {
         id
     } else {
@@ -91,7 +127,7 @@ pub(crate) fn build(music: &Music<'_>, seed: &Track) -> Result<Mix> {
             .find_map(|candidate| crate::youtube_stream::video_id(&candidate.source))
             .ok_or_else(|| anyhow::anyhow!("No matching seed recording"))?
     };
-    let radio = music.radio(&video, 24, None)?;
+    let radio = music.radio(&video, size, None)?;
     let tracks = serde_json::from_value::<Vec<Track>>(radio["tracks"].clone())?;
     let name = if seed.artist.trim().is_empty() {
         &seed.title
@@ -105,11 +141,89 @@ pub(crate) fn build(music: &Music<'_>, seed: &Track) -> Result<Mix> {
 }
 
 pub(crate) fn picks(mixes: &[Mix]) -> Vec<&Track> {
+    if let Some(first) = mixes.iter().find(|mix| mix.name == FOR_YOU) {
+        return first.tracks.iter().take(12).collect();
+    }
     let mut seen = HashSet::new();
     (0..24)
         .flat_map(|index| mixes.iter().filter_map(move |mix| mix.tracks.get(index)))
         .filter(|track| seen.insert(track.id.as_str()))
         .take(12)
+        .collect()
+}
+
+pub(crate) const FOR_YOU: &str = "Made for you";
+pub(crate) const DISCOVER: &str = "Discover";
+
+/// Every radio votes: a song that several of your seeds lead to ranks above one that only one of them
+/// does. Artists you play a lot get a boost, what you heard in the last days is held back, and
+/// "Discover" keeps only artists you have not been listening to.
+pub(crate) fn blend(mixes: &[Mix], taste: &Taste) -> Vec<Mix> {
+    let mut scores = HashMap::<String, (f32, &Track)>::new();
+    for (rank, mix) in mixes.iter().enumerate() {
+        let weight = 0.85_f32.powi(rank as i32);
+        for (position, track) in mix.tracks.iter().enumerate() {
+            let vote = weight / (1. + position as f32 / 5.);
+            scores
+                .entry(track.id.clone())
+                .and_modify(|(score, _)| *score += vote)
+                .or_insert((vote, track));
+        }
+    }
+    let mut ranked: Vec<(f32, &Track, bool)> = scores
+        .into_values()
+        .map(|(score, track)| {
+            let liking = taste.affinity.get(&artist_key(track)).copied();
+            let mut score = score * (1. + 0.6 * liking.unwrap_or(0.));
+            if taste.recent.contains(&track.id) {
+                score *= 0.25;
+            }
+            if taste.favorites.contains(&track.id) {
+                score *= 0.6;
+            }
+            (score, track, liking.is_none())
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+    let take = |new_only: bool| -> Vec<Track> {
+        let eligible: Vec<usize> = (0..ranked.len())
+            .filter(|&i| !new_only || ranked[i].2)
+            .collect();
+        let mut per_artist = HashMap::<String, usize>::new();
+        let mut chosen: Vec<usize> = Vec::new();
+        let mut add = |i: usize, chosen: &mut Vec<usize>| {
+            let seen = per_artist.entry(artist_key(ranked[i].1)).or_default();
+            if *seen < 3 && !chosen.contains(&i) {
+                *seen += 1;
+                chosen.push(i);
+            }
+        };
+        if !new_only {
+            // Give every seed a say first (its three best-ranked songs), so a second taste, say
+            // Vietnamese pop next to English indie, is not crowded out by the louder one.
+            for mix in mixes {
+                let ids: HashSet<&str> = mix.tracks.iter().map(|t| t.id.as_str()).collect();
+                eligible
+                    .iter()
+                    .filter(|&&i| ids.contains(ranked[i].1.id.as_str()))
+                    .take(3)
+                    .for_each(|&i| add(i, &mut chosen));
+            }
+        }
+        for &i in &eligible {
+            if chosen.len() >= 24 {
+                break;
+            }
+            add(i, &mut chosen);
+        }
+        chosen.sort_unstable();
+        chosen.truncate(24);
+        chosen.into_iter().map(|i| ranked[i].1.clone()).collect()
+    };
+    [(FOR_YOU, take(false)), (DISCOVER, take(true))]
+        .into_iter()
+        .filter(|(_, tracks)| tracks.len() >= 6)
+        .map(|(name, tracks)| Mix { name: name.into(), tracks })
         .collect()
 }
 
@@ -133,8 +247,9 @@ pub(crate) fn validate_tracks(value: &Value) -> Result<Vec<Track>> {
 pub(crate) fn account_mixes(
     music: &Music<'_>,
     token: Option<&str>,
-    local: Vec<Track>,
+    taste: &Taste,
 ) -> Result<Value> {
+    let local = taste.seeds.clone();
     let mut likes = Vec::new();
     let mut playlist_tracks = Vec::new();
     let mut generated = Vec::new();
@@ -196,7 +311,9 @@ pub(crate) fn account_mixes(
     };
     crate::jobs::check_cancelled()?;
     let generated_count = generated.len();
+    let blended = blend(&mixes, taste);
     mixes.extend(generated);
+    mixes.splice(0..0, blended);
     Ok(serde_json::json!({
         "picks":picks(&mixes), "mixes":mixes, "playlists":playlists, "youtube_oauth":token.is_some(),
         "youtube_signal":{"likes": likes.len(),"playlist_tracks":playlist_tracks.len(),"generated_mixes":generated_count},
@@ -229,7 +346,7 @@ fn account_seeds(
                 seen.insert(track.id.clone());
                 artists.insert(artist);
                 seeds.push(track.clone());
-                if seeds.len() == 3 {
+                if seeds.len() == SEEDS {
                     return seeds;
                 }
             }
@@ -332,5 +449,71 @@ mod account_tests {
             std::slice::from_ref(&liked),
         );
         assert_eq!(result, vec![liked, generated, playlist]);
+    }
+}
+
+#[cfg(test)]
+mod taste_tests {
+    use super::*;
+    use crate::model::PlayEvent;
+    use serde_json::json;
+
+    fn track(id: &str, artist: &str) -> Track {
+        serde_json::from_value(
+            json!({"id":id,"title":id,"artist":artist,"source":"fixture","platform":"youtube"}),
+        )
+        .unwrap()
+    }
+
+    fn library(plays: &[(&str, &str, u64)], favorites: &[&str]) -> Library {
+        let mut library = Library::default();
+        for (id, artist, at) in plays {
+            library.tracks.insert((*id).into(), track(id, artist));
+            library.history.push(PlayEvent { track_id: (*id).into(), started_at: *at });
+        }
+        library.favorites = favorites.iter().map(|id| (*id).to_owned()).collect();
+        library
+    }
+
+    const NOW: u64 = 10_000_000;
+
+    #[test]
+    fn a_track_cut_off_by_the_next_one_is_a_skip_and_not_a_seed() {
+        // "skipped" is followed by "kept" 8 seconds later; "kept" plays on.
+        let library = library(
+            &[("skipped", "A", NOW - 3600), ("kept", "B", NOW - 3592), ("later", "C", NOW - 600)],
+            &[],
+        );
+        let ids: Vec<_> = taste(&library, NOW).seeds.into_iter().map(|t| t.id).collect();
+        assert!(!ids.contains(&"skipped".to_owned()), "{ids:?}");
+        assert!(ids.contains(&"kept".to_owned()));
+    }
+
+    #[test]
+    fn recent_plays_and_old_plays_weigh_differently() {
+        let library = library(&[("old", "A", NOW - 100 * 86_400), ("fresh", "B", NOW - 3600)], &[]);
+        let taste = taste(&library, NOW);
+        assert_eq!(taste.seeds[0].id, "fresh");
+        assert!(taste.affinity["b"] > taste.affinity["a"]);
+        assert!(taste.recent.contains("fresh") && !taste.recent.contains("old"));
+    }
+
+    #[test]
+    fn songs_several_seeds_lead_to_rank_first_and_discover_skips_known_artists() {
+        let mix = |name: &str, ids: &[(&str, &str)]| Mix {
+            name: name.into(),
+            tracks: ids.iter().map(|(id, artist)| track(id, artist)).collect(),
+        };
+        let shared = ("shared", "Newcomer");
+        let m1 = mix("one", &[shared, ("a1", "Known"), ("a2", "Known"), ("a3", "Fresh1"), ("a4", "Fresh2"), ("a5", "Fresh3")]);
+        let m2 = mix("two", &[shared, ("b1", "Fresh4"), ("b2", "Fresh5"), ("b3", "Fresh6"), ("b4", "Fresh7"), ("b5", "Fresh8")]);
+        let mut taste = Taste::default();
+        taste.affinity.insert("known".into(), 1.);
+        let blended = blend(&[m1, m2], &taste);
+        let for_you = blended.iter().find(|m| m.name == FOR_YOU).unwrap();
+        assert_eq!(for_you.tracks[0].id, "shared", "the song both radios lead to goes first");
+        let discover = blended.iter().find(|m| m.name == DISCOVER).unwrap();
+        assert!(discover.tracks.iter().all(|t| t.artist != "Known"));
+        assert!(discover.tracks.len() <= 24 && for_you.tracks.len() <= 24);
     }
 }

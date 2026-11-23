@@ -204,8 +204,6 @@ impl Providers {
 
         if matches!(track.platform.as_str(), "youtube" | "ytmusic")
             && self.proxy.is_none()
-            && self.cookies.is_none()
-            && self.browser.is_none()
             && !DIRECT_FAILURES
                 .get_or_init(Default::default)
                 .lock()

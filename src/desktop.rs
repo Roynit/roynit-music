@@ -542,6 +542,7 @@ impl App {
         for key in ["google", "spotify"] {
             app.send("account-status", "oauth.status", json!({"provider":key}));
         }
+        riff_core::warm_up();
         // UI checks open a tab directly (e.g. "Settings" or "search:den vau") without driving the desktop.
         if let Ok(start) = std::env::var("ROYNIT_START_PAGE") {
             if let Some(query) = start.strip_prefix("search:") {
@@ -886,6 +887,15 @@ impl App {
                 }
                 self.mixes = serde_json::from_value(data["mixes"].clone()).unwrap_or_default();
                 self.suggested = serde_json::from_value(data["picks"].clone()).unwrap_or_default();
+                // The tracks most likely to be played next get their stream links ready now.
+                riff_core::warm_streams(
+                    self.suggested
+                        .iter()
+                        .chain(self.mixes.iter().filter_map(|mix| mix.tracks.first()))
+                        .take(10)
+                        .map(|track| track.source.clone())
+                        .collect(),
+                );
             }
             "mix-saved" => self.status = "Mix saved to your playlists".into(),
             "home" | "browse" | "recommendations" => {

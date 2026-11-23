@@ -943,15 +943,19 @@ impl Engine {
         let root = self.store.root.clone();
         let search_cache = self.search_cache.clone();
         let search_key = format!("{operation}|{params}");
-        let mix_seeds = if operation == "music.mixes" {
-            mixes::seeds(
+        let mix_taste = if operation == "music.mixes" {
+            mixes::taste(
                 &self.store.data,
                 SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
             )
         } else {
-            Vec::new()
+            mixes::Taste::default()
         };
-        let mix_key = format!("music.mixes|{}", serde_json::to_string(&mix_seeds)?);
+        let mix_key = format!(
+            "music.mixes|{}|{}",
+            serde_json::to_string(&mix_taste.seeds)?,
+            mix_taste.recent.len()
+        );
         let support = if operation == "support.export" {
             let state = self.snapshot();
             Some(
@@ -1047,7 +1051,7 @@ impl Engine {
                     )?).map_err(Into::into)
                 },
                 "music.mixes" => search_cache.run(mix_key, || {
-                    mixes::account_mixes(&youtube::Music{client:&client,cookies:providers.cookies.as_ref()}, google_token.as_deref(), mix_seeds)
+                    mixes::account_mixes(&youtube::Music{client:&client,cookies:providers.cookies.as_ref()}, google_token.as_deref(), &mix_taste)
                 }),
                 "music.home" => youtube::Music{client:&client,cookies:providers.cookies.as_ref()}.home(),
                 "music.charts" => youtube::Music{client:&client,cookies:providers.cookies.as_ref()}.charts(),
@@ -2227,6 +2231,19 @@ fn number(v: &Value, key: &str) -> Result<f64> {
 fn boolean(v: &Value, key: &str, fallback: bool) -> bool {
     v[key].as_bool().unwrap_or(fallback)
 }
+/// Called once the window is up: open connections and load FFmpeg so the first Play is not the first of everything.
+pub fn warm_up() {
+    std::thread::spawn(|| {
+        youtube_stream::preconnect();
+        let _ = tools::run("ffmpeg", ["-version"], Duration::from_secs(10));
+    });
+}
+
+/// Resolve stream links for tracks the listener is likely to play next.
+pub fn warm_streams(sources: Vec<String>) {
+    youtube_stream::warm(sources);
+}
+
 pub const COMMANDS: &[&str] = &[
     "player.toggle",
     "lastfm.authorize",

@@ -1,3 +1,8 @@
+# Roy Music 0.1.7
+
+- Playback starts in about 0.2 s instead of 3-6 s on many songs. YouTube refused the whole-file request FFmpeg makes for larger tracks, which forced a slow fallback; Roy Music now relays it in small ranges. Stream links are also prepared in advance for the songs on your home page, and the connection is warmed when the app opens.
+- Better recommendations: Mixes now learn from skips and repeats, favour recent listening, and add "Made for you" (songs several of your seeds lead to) and "Discover" (new artists near your taste). Six seeds instead of three, and your home picks come from the blended mix.
+
 # Roy Music 0.1.6
 
 - Roy Music icon (black R on a green disc) is now embedded in the app and Setup, so Explorer, Start, the taskbar and shortcuts show it.
