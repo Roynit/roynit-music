@@ -80,6 +80,11 @@ enum Action {
     Username,
     CheckName,
     Password,
+    Forgot,
+    Reset,
+    Verify,
+    Resend,
+    SetEmail,
     SignOut,
     ReadMusic,
     WriteMusic,
@@ -130,6 +135,20 @@ pub struct State {
     current_password: String,
     new_password: String,
     confirm_password: String,
+    reset: ResetStage,
+    reset_code: String,
+    verify_code: String,
+    new_email: String,
+    changing_email: bool,
+}
+
+/// The "Forgot password?" flow on the sign-in form: ask for the account, then enter the emailed code.
+#[derive(Clone, Copy, PartialEq, Default)]
+enum ResetStage {
+    #[default]
+    Off,
+    Asking,
+    Entering,
 }
 
 /// Where the username being typed stands: unchanged, waiting to be checked, or known free or taken.
@@ -213,6 +232,11 @@ impl State {
             current_password: String::new(),
             new_password: String::new(),
             confirm_password: String::new(),
+            reset: ResetStage::Off,
+            reset_code: String::new(),
+            verify_code: String::new(),
+            new_email: String::new(),
+            changing_email: false,
         };
         if state.token.is_some() {
             state.request(Action::Check, Value::Null);
@@ -223,6 +247,11 @@ impl State {
     /// Nobody is signed in and no saved session exists to try: the app asks for an account first.
     pub fn needs_sign_in(&self) -> bool {
         self.profile.is_null() && self.token.is_none()
+    }
+
+    /// Signed in with a password account whose email has not been confirmed yet.
+    pub fn needs_email(&self) -> bool {
+        !self.profile.is_null() && self.profile["email_verified"] == false
     }
 
     pub fn is_signed_out(&self) -> bool {
@@ -365,6 +394,11 @@ impl State {
                 true,
             ),
             Action::Password => (reqwest::Method::PUT, "/me/password".to_owned(), true),
+            Action::Verify => (reqwest::Method::POST, "/email/verify".to_owned(), true),
+            Action::Resend => (reqwest::Method::POST, "/email/resend".to_owned(), true),
+            Action::SetEmail => (reqwest::Method::PUT, "/me/email".to_owned(), true),
+            Action::Forgot => (reqwest::Method::POST, "/password/forgot".to_owned(), false),
+            Action::Reset => (reqwest::Method::POST, "/password/reset".to_owned(), false),
             Action::Banner => (reqwest::Method::PUT, "/me/banner".to_owned(), true),
             Action::BannerRemove => (reqwest::Method::DELETE, "/me/banner".to_owned(), true),
             Action::SignOut => (reqwest::Method::POST, "/logout".to_owned(), true),
@@ -594,6 +628,30 @@ impl State {
                                     self.notice("Password saved. Your other devices were signed out.", false);
                                 }
                             }
+                            Action::Verify | Action::SetEmail => {
+                                self.profile = data["account"].clone();
+                                self.verify_code.clear();
+                                self.changing_email = false;
+                                self.notice(
+                                    if action == Action::Verify {
+                                        "Email verified. Welcome to Roy Music!"
+                                    } else {
+                                        "We sent a new code to that address."
+                                    },
+                                    false,
+                                );
+                            }
+                            Action::Resend => self.notice("A new code is on its way.", false),
+                            Action::Forgot => {
+                                self.reset = ResetStage::Entering;
+                                self.notice("If an account matches, a code is on its way to its email.", false);
+                            }
+                            Action::Reset => {
+                                self.reset = ResetStage::Off;
+                                self.reset_code.clear();
+                                self.accept_account(data);
+                                self.notice("Password reset. You are signed in.", false);
+                            }
                             Action::CheckName => {
                                 if data["username"].as_str() == Some(self.new_username.as_str()) {
                                     self.name_state = if data["available"] == true {
@@ -715,6 +773,8 @@ impl State {
                                         | Action::Register
                                         | Action::Pickup
                                         | Action::Password
+                                        | Action::Forgot
+                                        | Action::Reset
                                 )
                             {
                                 self.clear_session();
@@ -1440,13 +1500,18 @@ impl App {
 
     /// Shown over everything on a fresh install, until someone signs in; it cannot be dismissed.
     pub(super) fn roynit_gate(&mut self, ctx: &egui::Context) {
-        if !self.roy_account.needs_sign_in() {
+        let confirm = self.roy_account.needs_email();
+        if !self.roy_account.needs_sign_in() && !confirm {
             return;
         }
         let top = self.dialog_top();
         Self::dialog(ctx, top, "gate", false, |ui| {
             ui.set_width(400.);
-            self.sign_in_body(ui, true);
+            if confirm {
+                self.email_body(ui);
+            } else {
+                self.sign_in_body(ui, true);
+            }
             let account = &self.roy_account;
             if !account.status.is_empty() {
                 ui.add_space(8.);
@@ -1458,6 +1523,76 @@ impl App {
                 ui.add(egui::Label::new(RichText::new(&account.status).color(color)).wrap());
             }
         });
+    }
+
+    /// "Check your email": the code that finishes creating a password account.
+    fn email_body(&mut self, ui: &mut egui::Ui) {
+        let account = &mut self.roy_account;
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::Image::new(egui::include_image!("../assets/icon.png"))
+                    .fit_to_exact_size(egui::vec2(52., 52.)),
+            );
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Check your email").size(25.).bold());
+                muted(ui, "One last step");
+            });
+        });
+        ui.add_space(16.);
+        let address = account.profile["email"].as_str().unwrap_or_default().to_owned();
+        ui.add_enabled_ui(account.pending.is_none(), |ui| {
+            if account.changing_email {
+                muted(ui, "Type the right address and we will send a new code there.");
+                ui.add_space(8.);
+                field(ui, "Email", &mut account.new_email, false, 254);
+                ui.horizontal_wrapped(|ui| {
+                    if primary(ui, "Send code").clicked() && !account.new_email.trim().is_empty() {
+                        account.request(Action::SetEmail, json!({"email":account.new_email}));
+                        account.notice("", false);
+                    }
+                    if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                        account.changing_email = false;
+                    }
+                });
+            } else {
+                muted(ui, format!("We sent a 6-digit code to {address}. Enter it to finish creating your account."));
+                ui.add_space(8.);
+                ui.label(
+                    RichText::new("Can't find it? Look in your Spam or Junk folder too. It can take a minute to arrive.")
+                        .small()
+                        .color(MUTED),
+                );
+                ui.add_space(4.);
+                field(ui, "6-digit code", &mut account.verify_code, false, 6);
+                ui.horizontal_wrapped(|ui| {
+                    let ready = account.verify_code.trim().len() == 6;
+                    let verify = egui::Button::new(RichText::new("Verify").bold().color(Color32::BLACK))
+                        .fill(Color32::WHITE)
+                        .corner_radius(18)
+                        .min_size(egui::vec2(110., 36.));
+                    if ui.add_enabled(ready, verify).clicked() {
+                        account.request(Action::Verify, json!({"code":account.verify_code.trim()}));
+                        account.notice("", false);
+                    }
+                    if ui.button("Send a new code").clicked() {
+                        account.request(Action::Resend, Value::Null);
+                        account.notice("", false);
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    if ui.add(egui::Button::new(RichText::new("Wrong email?").small().color(MUTED)).frame(false)).clicked() {
+                        account.changing_email = true;
+                        account.new_email = address.clone();
+                    }
+                    if ui.add(egui::Button::new(RichText::new("Sign out").small().color(MUTED)).frame(false)).clicked() {
+                        account.sign_out();
+                    }
+                });
+            }
+        });
+        if account.pending.is_some() {
+            ui.spinner();
+        }
     }
 
     fn sign_in_body(&mut self, ui: &mut egui::Ui, gate: bool) {
@@ -1512,6 +1647,49 @@ impl App {
             }
             return;
         }
+        if account.reset != ResetStage::Off {
+            ui.add_enabled_ui(account.pending.is_none(), |ui| {
+                ui.label(RichText::new("Reset your password").size(20.).bold());
+                ui.add_space(6.);
+                if account.reset == ResetStage::Asking {
+                    muted(ui, "Enter the email or username of your account. We will email a 6-digit code to the address on it.");
+                    ui.add_space(8.);
+                    field(ui, "Email or username", &mut account.email, false, 254);
+                    ui.horizontal_wrapped(|ui| {
+                        if primary(ui, "Send code").clicked() && !account.email.trim().is_empty() {
+                            account.request(Action::Forgot, json!({"login":account.email}));
+                            account.notice("", false);
+                        }
+                        if ui.add(egui::Button::new("Back to sign in").frame(false)).clicked() {
+                            account.reset = ResetStage::Off;
+                        }
+                    });
+                } else {
+                    muted(ui, "Enter the code we emailed to the account (it works for 15 minutes), then choose a new password. Check your Spam or Junk folder if it does not show up.");
+                    ui.add_space(8.);
+                    field(ui, "6-digit code", &mut account.reset_code, false, 6);
+                    field(ui, "New password", &mut account.password, true, 128);
+                    muted(ui, "Use at least 6 characters.");
+                    ui.add_space(8.);
+                    ui.horizontal_wrapped(|ui| {
+                        let ready = account.reset_code.trim().len() == 6 && account.password.chars().count() >= 6;
+                        let go = ui.add_enabled(ready, egui::Button::new(RichText::new("Reset password").bold().color(Color32::BLACK)).fill(Color32::WHITE).corner_radius(18).min_size(egui::vec2(140., 36.)));
+                        if go.clicked() {
+                            let password = std::mem::take(&mut account.password);
+                            account.request(Action::Reset, json!({"login":account.email,"code":account.reset_code.trim(),"password":password}));
+                            account.notice("", false);
+                        }
+                        if ui.button("Send a new code").clicked() {
+                            account.request(Action::Forgot, json!({"login":account.email}));
+                        }
+                        if ui.add(egui::Button::new("Back").frame(false)).clicked() {
+                            account.reset = ResetStage::Off;
+                            account.password.clear();
+                        }
+                    });
+                }
+            });
+        } else {
         ui.add_enabled_ui(account.pending.is_none(), |ui| {
                 ui.horizontal(|ui| {
                     if App::filter_chip(ui, "Sign in", !account.register).clicked() {
@@ -1535,6 +1713,10 @@ impl App {
                 field(ui,"Password",&mut account.password,true,128);
                 if account.register {
                     muted(ui, "Use at least 6 characters.");
+                } else if ui.add(egui::Button::new(RichText::new("Forgot password?").small().color(MUTED)).frame(false)).clicked() {
+                    account.reset = ResetStage::Asking;
+                    account.password.clear();
+                    account.notice("", false);
                 }
                 ui.add_space(8.);
                 ui.horizontal_wrapped(|ui| {
@@ -1555,6 +1737,7 @@ impl App {
                     }
                 });
             });
+        }
         if account.pending.is_some() {
             ui.spinner();
         }

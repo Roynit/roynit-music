@@ -71,3 +71,33 @@ OAUTH_TEST_BASE=http://127.0.0.1:8791
 - `GET /music` returns only the signed-in user's snapshot. `PUT /music` accepts a `snapshot` and the expected `revision`. A stale revision returns HTTP 409. Merge the downloaded cloud library into the current device before resuming uploads.
 - Music uploads are opt-in. The snapshot contains online track metadata and references for liked tracks, playlists and recent listening history. Local audio, filesystem paths, cookies, playback URLs, and provider credentials stay on the device. Listening history merged into the local library is available to the existing mix engine. Local library data stays on the device after sign-out.
 - To deploy changes, apply D1 migrations remotely before running `npx wrangler deploy` from `accounts/`. The Worker owns only `/api/account/*` on the existing site.
+
+## Email: verification and forgot password
+
+New password accounts must confirm their email. Registering mails a 6-digit code (valid 15 minutes, five tries); `POST /email/verify` confirms it, `POST /email/resend` sends another, and `PUT /me/email` fixes a typo while the address is unconfirmed. Existing accounts and Google accounts count as verified. Without a mail transport configured, sign-up skips verification so nobody is locked out.
+
+`POST /password/forgot` mails a 6-digit reset code to a **confirmed** address, and `POST /password/reset` takes the code and a new password, signs every device out and signs the person in. The answer to "forgot" is the same whether or not the account exists.
+
+Mail leaves through, in this order: the local test table, Gmail SMTP, or the Cloudflare `EMAIL` binding.
+
+### Gmail (free)
+
+1. Create a Gmail address for the app, turn on 2-Step Verification, then create an **App password** (Google Account → Security → App passwords).
+2. From `accounts/`, set both as Worker secrets (you type them yourself; they are never committed):
+
+```sh
+npx wrangler secret put GMAIL_USER           # the full address, for example your.app.name@gmail.com
+npx wrangler secret put GMAIL_APP_PASSWORD   # the 16-character app password
+npx wrangler d1 migrations apply roynit-accounts --remote
+npx wrangler deploy
+```
+
+Gmail allows about 500 messages a day. The Worker talks to `smtp.gmail.com:465` over TLS (`cloudflare:sockets`). `/health` reports `email: true` once the secrets exist.
+
+### Cloudflare Email Service (alternative)
+
+Add `"send_email": [{ "name": "EMAIL" }]` and a `MAIL_FROM` var to `wrangler.json`, use the Workers Paid plan and onboard the sending domain in the dashboard (Email → Email Sending).
+
+### Local tests
+
+Put `MAIL_TEST_OUTBOX=1`, `FORGOT_LIMIT=500` and `REGISTER_LIMIT=200` in the git-ignored `accounts/.dev.vars`: mail is stored in `mail_outbox` and `GET /test/outbox?to=` returns the last body. Never set `MAIL_TEST_OUTBOX` in production. Clear `auth_limits` between runs if sign-in limits are hit.

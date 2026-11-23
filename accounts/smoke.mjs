@@ -262,3 +262,74 @@ test("username changes and passwords", async () => {
   await request("/me", "GET", undefined, a.token);
   await request("/me", "GET", undefined, second.token, 401);
 });
+
+test("forgot password: emailed code, limits and a fresh sign-in", async () => {
+  const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
+  const password = "local-" + crypto.randomUUID();
+  const email = "r_" + nonce + "@example.test";
+  const a = await request("/register", "POST", { email, username: "r_" + nonce, password });
+  const lastCode = async () => (await request("/test/outbox?to=" + encodeURIComponent(email))).body?.match(/\b(\d{6})\b/)?.[1];
+
+  // Reset codes only go to an address that has been confirmed.
+  const confirm = (await request("/test/outbox?to=" + encodeURIComponent(email))).body.match(/\b(\d{6})\b/)[1];
+  await request("/email/verify", "POST", { code: confirm }, a.token);
+
+  // The same quiet answer for an account that does not exist, and no mail for it.
+  assert.deepEqual(await request("/password/forgot", "POST", { login: "nobody_" + nonce + "@example.test" }), { ok: true });
+  assert.deepEqual(await request("/password/forgot", "POST", { login: "R_" + nonce }), { ok: true });
+  const code = await lastCode();
+  assert.match(code, /^\d{6}$/);
+
+  const next = "fresh-" + crypto.randomUUID();
+  const reset = (body, status) => request("/password/reset", "POST", { login: email, password: next, ...body }, undefined, status);
+  await reset({ code: code === "000000" ? "111111" : "000000" }, 400);
+  await reset({ code: "12ab" }, 400);
+  await reset({ code, password: "abc" }, 400);
+  const signedIn = await reset({ code });
+  assert.equal(signedIn.account.id, a.account.id);
+  assert.ok(signedIn.token);
+  // The code works once, the old password and old sessions are gone, the new password works.
+  await reset({ code }, 400);
+  await request("/me", "GET", undefined, a.token, 401);
+  await request("/login", "POST", { login: email, password }, undefined, 401);
+  await request("/login", "POST", { login: email, password: next });
+
+  // Five wrong tries burn the code, even for the right one afterwards.
+  await request("/password/forgot", "POST", { login: email });
+  const live = await lastCode();
+  const wrong = live === "999999" ? "888888" : "999999";
+  for (let i = 0; i < 5; i++) await reset({ code: wrong }, 400);
+  await reset({ code: live }, 400);
+});
+
+test("email verification at sign-up", async () => {
+  const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
+  const password = "local-" + crypto.randomUUID();
+  const email = "e_" + nonce + "@example.test";
+  const a = await request("/register", "POST", { email, username: "e_" + nonce, password });
+  const mailTo = async (to) => (await request("/test/outbox?to=" + encodeURIComponent(to))).body;
+  const codeIn = (body) => body.match(/\b(\d{6})\b/)[1];
+  assert.equal(a.account.email_verified, false);
+  const first = codeIn(await mailTo(email));
+
+  // Until the address is confirmed, "forgot password" sends nothing new.
+  assert.deepEqual(await request("/password/forgot", "POST", { login: email }), { ok: true });
+  assert.match(await mailTo(email), /verification code/);
+
+  // A wrong code is refused; a typo in the address can be fixed, which mails a fresh code to the new one.
+  await request("/email/verify", "POST", { code: first === "000000" ? "111111" : "000000" }, a.token, 400);
+  const fixed = "f_" + nonce + "@example.test";
+  assert.equal((await request("/me/email", "PUT", { email: fixed }, a.token)).account.email, fixed);
+  await request("/me/email", "PUT", { email: "not-an-email" }, a.token, 400);
+  await request("/email/verify", "POST", { code: first }, a.token, 400);
+  const second = codeIn(await mailTo(fixed));
+  const done = await request("/email/verify", "POST", { code: second }, a.token);
+  assert.equal(done.account.email_verified, true);
+  assert.equal((await request("/me", "GET", undefined, a.token)).account.email_verified, true);
+  await request("/me/email", "PUT", { email }, a.token, 400);
+  await request("/email/resend", "POST", undefined, a.token, 400);
+
+  // Now a reset code is mailed.
+  await request("/password/forgot", "POST", { login: fixed });
+  assert.match(await mailTo(fixed), /reset code/);
+});

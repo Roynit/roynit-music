@@ -1,3 +1,8 @@
+# Roy Music 0.2.4
+
+- Confirm your email: after you create an account with a password, Roy Music emails a 6-digit code and asks for it before you continue. Fix a mistyped address from the same screen. The screen reminds you to look in Spam or Junk if the email does not show up.
+- Forgot your password? Tap "Forgot password?" on the sign-in form, enter your email or username, and a code is emailed to the (confirmed) address. Enter it with a new password to get back in; your other devices are signed out.
+
 # Roy Music 0.2.3
 
 - Updates install themselves: when a newer version exists, Roy Music downloads it quietly (checked with SHA-256) and installs it the next time you open the app. Turn it off in Settings → Data & updates → "Install updates automatically".

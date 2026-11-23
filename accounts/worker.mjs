@@ -1,5 +1,6 @@
 import { scrypt, timingSafeEqual } from "node:crypto";
 import { Buffer } from "node:buffer";
+import { connect } from "cloudflare:sockets";
 
 const encoder = new TextEncoder();
 const DAY = 86_400;
@@ -8,9 +9,9 @@ const now = () => Math.floor(Date.now() / 1000);
 const hex = (bytes) => Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
 const random = () => hex(crypto.getRandomValues(new Uint8Array(32)));
 const digest = async (text) => hex(await crypto.subtle.digest("SHA-256", encoder.encode(text)));
-const publicUser = ({id, email, username, display_name, google_subject, password, orbs, bio, avatar_set, avatar_version, banner_set, banner_version, created_at}, base) => ({
+const publicUser = ({id, email, username, display_name, google_subject, password, orbs, email_verified, bio, avatar_set, avatar_version, banner_set, banner_version, created_at}, base) => ({
   id, email, username, display_name, provider: google_subject ? "google" : "password",
-  has_password: !!password, has_google: !!google_subject, orbs: orbs || 0,
+  has_password: !!password, has_google: !!google_subject, orbs: orbs || 0, email_verified: !!email_verified,
   bio: bio || "", created_at,
   // The version in the URL changes with every upload, so browsers and the app can cache it forever.
   avatar_url: avatar_set ? base + "/avatar/" + id + "?v=" + avatar_version : null,
@@ -135,9 +136,12 @@ async function credentials(request, env, register) {
     const salt = random();
     const hash = await passwordHash(password, salt);
     const user = await env.DB.prepare(
-      "INSERT OR IGNORE INTO users(id,email,username,display_name,password,created_at) VALUES (?,?,?,?,?,?) RETURNING *"
-    ).bind(crypto.randomUUID(), email, username, username, "scrypt:"+salt+":"+hash, now()).first();
+      "INSERT OR IGNORE INTO users(id,email,username,display_name,password,created_at,email_verified) VALUES (?,?,?,?,?,?,?) RETURNING *"
+    ).bind(crypto.randomUUID(), email, username, username, "scrypt:"+salt+":"+hash, now(), mailReady(env) ? 0 : 1).first();
     if (!user) throw new HttpError(409,"That email or username is already in use.");
+    if (!user.email_verified) {
+      try { await issueEmailCode(env, user); } catch (error) { console.error("Verification email failed", error?.code || error?.name); }
+    }
     return session(env, user);
   }
   const login = str(body.login).trim().toLowerCase();
@@ -397,6 +401,136 @@ async function linkToken(request, env, user, provider) {
   }
   return reply({access_token,expires_in:Number.isFinite(expires_in) ? expires_in : 3600});
 }
+// ---- Forgot password: a 6-digit code emailed to the account, valid for 15 minutes ----
+const RESET_SECONDS = 900;
+const RESET_TRIES = 5;
+// Mail can leave through Gmail SMTP (a Gmail address plus an app password), the Cloudflare Email binding, or,
+// in local tests only, a table. Without any of them nothing is sent and signing up skips email verification.
+const mailReady = (env) => !!(env.MAIL_TEST_OUTBOX || env.EMAIL || (env.GMAIL_USER && env.GMAIL_APP_PASSWORD));
+async function smtpSend(env, to, subject, text) {
+  const user = str(env.GMAIL_USER);
+  const socket = connect({ hostname: env.SMTP_HOST || "smtp.gmail.com", port: Number(env.SMTP_PORT) || 465 },
+    { secureTransport: env.SMTP_PLAIN ? "off" : "on" });
+  const reader = socket.readable.getReader();
+  const writer = socket.writable.getWriter();
+  const decoder = new TextDecoder();
+  let pending = "";
+  // One complete server reply (it may span several lines; the last one has a space after the code).
+  const read = async () => {
+    for (;;) {
+      const lines = pending.split("\r\n");
+      const last = lines.slice(0, -1).findIndex((line) => /^\d{3}( |$)/.test(line));
+      if (last >= 0) {
+        pending = lines.slice(last + 1).join("\r\n");
+        return Number(lines[last].slice(0, 3));
+      }
+      const { value, done } = await reader.read();
+      if (done) throw new Error("smtp closed");
+      pending += decoder.decode(value, { stream: true });
+    }
+  };
+  const say = (line) => writer.write(encoder.encode(line + "\r\n"));
+  const expect = async (code) => { if (await read() !== code) throw new Error("smtp refused"); };
+  const run = async () => {
+    await expect(220);
+    await say("EHLO roynit.dangz.org"); await expect(250);
+    await say("AUTH PLAIN " + btoa("\0" + user + "\0" + str(env.GMAIL_APP_PASSWORD))); await expect(235);
+    await say("MAIL FROM:<" + user + ">"); await expect(250);
+    await say("RCPT TO:<" + to + ">"); await expect(250);
+    await say("DATA"); await expect(354);
+    const body = btoa(String.fromCharCode(...encoder.encode(text))).replace(/.{76}/g, "$&\r\n");
+    await say(["From: Roy Music <" + user + ">", "To: <" + to + ">", "Subject: " + subject, "Date: " + new Date().toUTCString(),
+      "MIME-Version: 1.0", "Content-Type: text/plain; charset=utf-8", "Content-Transfer-Encoding: base64", "", body, "."].join("\r\n"));
+    await expect(250);
+    await say("QUIT");
+  };
+  let timer;
+  try {
+    await Promise.race([run(), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("smtp timeout")), 15000); })]);
+  } finally {
+    clearTimeout(timer);
+    try { socket.close(); } catch {}
+  }
+}
+async function sendMail(env, to, subject, text) {
+  if (!emailPattern.test(to)) throw new HttpError(400, "That email address is not valid.");
+  if (env.MAIL_TEST_OUTBOX) {
+    await env.DB.prepare("INSERT INTO mail_outbox(to_address,subject,body,created_at) VALUES (?,?,?,?)").bind(to, subject, text, now()).run();
+  } else if (env.GMAIL_USER && env.GMAIL_APP_PASSWORD) {
+    await smtpSend(env, to, subject, text);
+  } else if (env.EMAIL) {
+    await env.EMAIL.send({ to, from: { email: env.MAIL_FROM || "no-reply@dangz.org", name: "Roy Music" }, subject, text });
+  } else {
+    throw new HttpError(503, "Email is not set up on this server.");
+  }
+}
+const sixDigits = () => String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, "0");
+// A code for confirming the address on an account; only its hash is kept.
+async function issueEmailCode(env, user) {
+  const code = sixDigits();
+  await env.DB.prepare("INSERT INTO email_codes(user_id,email,code_hash,expires_at,attempts) VALUES (?,?,?,?,0) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email,code_hash=excluded.code_hash,expires_at=excluded.expires_at,attempts=0")
+    .bind(user.id, user.email, await digest(user.id + ":email:" + code), now() + RESET_SECONDS).run();
+  await sendMail(env, user.email, "Verify your Roy Music email",
+    "Your Roy Music verification code is " + code + ".\n\nIt works for 15 minutes. If you did not create a Roy Music account, ignore this email.");
+}
+async function accountFor(env, login) {
+  // An account that signs in with a password comes first when an email is shared with a Google account.
+  return env.DB.prepare("SELECT * FROM users WHERE email=?1 OR username=?1 ORDER BY password IS NULL LIMIT 1").bind(login).first();
+}
+async function passwordForgot(request, env) {
+  await rate(env, request, "forgot", Number(env.FORGOT_LIMIT) || 10);
+  const login = str((await json(request)).login).trim().toLowerCase();
+  if (!login || login.length > 254) throw new HttpError(400, "Enter your email or username.");
+  await rate(env, request, "forgot-identity", 3, login);
+  const user = await accountFor(env, login);
+  if (user?.email_verified) {
+    const code = sixDigits();
+    await env.DB.prepare("INSERT INTO password_resets(user_id,code_hash,expires_at,attempts) VALUES (?,?,?,0) ON CONFLICT(user_id) DO UPDATE SET code_hash=excluded.code_hash,expires_at=excluded.expires_at,attempts=0")
+      .bind(user.id, await digest(user.id + ":" + code), now() + RESET_SECONDS).run();
+    try {
+      await sendMail(env, user.email, "Your Roy Music reset code",
+        "Your Roy Music password reset code is " + code + ".\n\nIt works for 15 minutes. If you did not ask for it, ignore this email: your password has not changed.");
+    } catch (error) {
+      console.error("Reset email failed", error?.code || error?.name);
+    }
+  }
+  // The same answer whether or not the account exists, so this cannot be used to find accounts.
+  return reply({ ok: true });
+}
+async function passwordReset(request, env) {
+  await rate(env, request, "reset", Number(env.FORGOT_LIMIT) || 20);
+  const body = await json(request);
+  const login = str(body.login).trim().toLowerCase();
+  const code = str(body.code).trim();
+  const password = str(body.password);
+  if (!login || login.length > 254) throw new HttpError(400, "Enter your email or username.");
+  if (password.length < 6 || password.length > 128) throw new HttpError(400, "Use a password of 6 to 128 characters.");
+  await rate(env, request, "reset-identity", 10, login);
+  const wrong = new HttpError(400, "That code is not right or has expired.");
+  const user = /^\d{6}$/.test(code) ? await accountFor(env, login) : null;
+  if (!user) throw wrong;
+  const row = await env.DB.prepare("SELECT * FROM password_resets WHERE user_id=?").bind(user.id).first();
+  if (!row || row.expires_at <= now()) throw wrong;
+  if (row.code_hash !== await digest(user.id + ":" + code)) {
+    const tries = await env.DB.prepare("UPDATE password_resets SET attempts=attempts+1 WHERE user_id=? RETURNING attempts").bind(user.id).first();
+    if (tries.attempts >= RESET_TRIES) await env.DB.prepare("DELETE FROM password_resets WHERE user_id=?").bind(user.id).run();
+    throw wrong;
+  }
+  const salt = random();
+  let updated;
+  try {
+    updated = await env.DB.prepare("UPDATE users SET password=? WHERE id=? RETURNING *")
+      .bind("scrypt:" + salt + ":" + await passwordHash(password, salt), user.id).first();
+  } catch (error) {
+    if (String(error?.message).includes("UNIQUE")) throw new HttpError(409, "Another account already signs in with this email and a password.");
+    throw error;
+  }
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM password_resets WHERE user_id=?").bind(user.id),
+    env.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(user.id),
+  ]);
+  return session(env, updated);
+}
 // ---- Friends, presence and direct messages ----
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ONLINE_FOR = 75;
@@ -521,7 +655,7 @@ async function route(request, env, ctx) {
   const url = new URL(request.url);
   if (!url.pathname.startsWith(PREFIX+"/")) throw new HttpError(404,"Not found.");
   const path = url.pathname.slice(PREFIX.length);
-  if (path === "/health" && request.method === "GET") return reply({ready:true,google:!!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),link:available(env)});
+  if (path === "/health" && request.method === "GET") return reply({ready:true,google:!!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),link:available(env),email:mailReady(env)});
   if (request.method === "POST" && (path === "/register" || path === "/login")) {
     ctx.waitUntil(env.DB.batch([
       env.DB.prepare("DELETE FROM auth_limits WHERE expires_at<=?").bind(now()),
@@ -530,6 +664,12 @@ async function route(request, env, ctx) {
       env.DB.prepare("DELETE FROM link_attempts WHERE expires_at<=?").bind(now()),
     ]).catch(()=>{}));
     return credentials(request,env,path==="/register");
+  }
+  if (request.method==="POST" && path==="/password/forgot") return passwordForgot(request,env);
+  if (request.method==="POST" && path==="/password/reset") return passwordReset(request,env);
+  if (env.MAIL_TEST_OUTBOX && request.method==="GET" && path==="/test/outbox") {
+    const row = await env.DB.prepare("SELECT body FROM mail_outbox WHERE to_address=? ORDER BY id DESC LIMIT 1").bind(url.searchParams.get("to") || "").first();
+    return reply({ body: row?.body || null });
   }
   if (request.method==="POST" && path==="/google/start") return googleBegin(request,env);
   if (request.method==="POST" && path==="/google/pickup") return googlePickup(request,env);
@@ -608,6 +748,51 @@ async function route(request, env, ctx) {
     // Changing a password signs every other device out.
     await env.DB.prepare("DELETE FROM sessions WHERE user_id=? AND token_hash!=?").bind(user.id, hash).run();
     return reply({account:publicUser({...user, password:"set"},env.PUBLIC_BASE)});
+  }
+  if (path==="/email/verify" && request.method==="POST") {
+    if (user.email_verified) return reply({account:publicUser(user,env.PUBLIC_BASE)});
+    await rate(env, request, "emailverify", 20, user.id);
+    const code = str((await json(request)).code).trim();
+    const wrong = new HttpError(400,"That code is not right or has expired.");
+    const row = await env.DB.prepare("SELECT * FROM email_codes WHERE user_id=?").bind(user.id).first();
+    if (!/^\d{6}$/.test(code) || !row || row.expires_at <= now() || row.email !== user.email) throw wrong;
+    if (row.code_hash !== await digest(user.id + ":email:" + code)) {
+      const tries = await env.DB.prepare("UPDATE email_codes SET attempts=attempts+1 WHERE user_id=? RETURNING attempts").bind(user.id).first();
+      if (tries.attempts >= RESET_TRIES) await env.DB.prepare("DELETE FROM email_codes WHERE user_id=?").bind(user.id).run();
+      throw wrong;
+    }
+    const [, done] = await env.DB.batch([
+      env.DB.prepare("DELETE FROM email_codes WHERE user_id=?").bind(user.id),
+      env.DB.prepare("UPDATE users SET email_verified=1 WHERE id=? RETURNING *").bind(user.id),
+    ]);
+    return reply({account:publicUser(done.results[0],env.PUBLIC_BASE)});
+  }
+  if (path==="/email/resend" && request.method==="POST") {
+    if (user.email_verified) throw new HttpError(400,"Your email is already verified.");
+    await rate(env, request, "emailresend", 3, user.id);
+    try { await issueEmailCode(env, user); } catch (error) {
+      console.error("Verification email failed", error?.code || error?.name);
+      throw new HttpError(503,"Could not send the email right now. Try again in a moment.");
+    }
+    return reply({ok:true});
+  }
+  if (path==="/me/email" && request.method==="PUT") {
+    if (user.email_verified) throw new HttpError(400,"Your email is already verified.");
+    await rate(env, request, "emailchange", 5, user.id);
+    const email = str((await json(request)).email).trim().toLowerCase();
+    if (email.length > 254 || !emailPattern.test(email)) throw new HttpError(400,"Enter a valid email address.");
+    let updated;
+    try {
+      updated = await env.DB.prepare("UPDATE users SET email=? WHERE id=? RETURNING *").bind(email, user.id).first();
+    } catch (error) {
+      if (String(error?.message).includes("UNIQUE")) throw new HttpError(409,"That email is already used by another account.");
+      throw error;
+    }
+    try { await issueEmailCode(env, updated); } catch (error) {
+      console.error("Verification email failed", error?.code || error?.name);
+      throw new HttpError(503,"Could not send the email right now. Try again in a moment.");
+    }
+    return reply({account:publicUser(updated,env.PUBLIC_BASE)});
   }
   if (path==="/me/avatar" && request.method==="PUT") {
     await rate(env, request, "avatar", 20, user.id);
