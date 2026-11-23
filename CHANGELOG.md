@@ -1,3 +1,8 @@
+# Roy Music 0.2.5
+
+- Fixed lyrics that began with page clutter ("39 Contributors", a list of translations, a blurb ending in "Read More") on some songs. Lines are also joined correctly when a phrase is annotated, and lyrics saved with the clutter are fetched again.
+- Your profile card in the Friends sidebar now fits the width of the Direct Messages column. Tap the Status row to switch between Online and Invisible.
+
 # Roy Music 0.2.4
 
 - Confirm your email: after you create an account with a password, Roy Music emails a 6-digit code and asks for it before you continue. Fix a mistyped address from the same screen. The screen reminds you to look in Spam or Junk if the email does not show up.

@@ -240,15 +240,80 @@ pub fn fetch(
                 .send()?
                 .error_for_status()?
                 .text()?;
-            let doc = scraper::Html::parse_document(&html);
-            let selector = scraper::Selector::parse("[data-lyrics-container='true']").unwrap();
-            let text = doc
-                .select(&selector)
-                .map(|el| el.text().collect::<Vec<_>>().join("\n"))
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            result(source, &text)
+            result(source, &genius_text(&html))
         }
         _ => anyhow::bail!("Unknown lyric provider"),
+    }
+}
+
+/// Text of one lyrics block: `<br>` is a line break, and Genius' own extras (contributors, translations,
+/// "Read More", ads) are marked `data-exclude-from-selection` and left out.
+fn block_text(el: scraper::ElementRef, out: &mut String) {
+    for child in el.children() {
+        if let Some(text) = child.value().as_text() {
+            out.push_str(text);
+        } else if let Some(inner) = scraper::ElementRef::wrap(child) {
+            let tag = inner.value().name();
+            if inner.value().attr("data-exclude-from-selection") == Some("true")
+                || matches!(tag, "script" | "style")
+            {
+                continue;
+            }
+            if tag == "br" {
+                out.push('\n');
+            } else {
+                block_text(inner, out);
+            }
+        }
+    }
+}
+
+/// Drops the page header Genius puts before the words ("39 Contributors", the list of translations, a
+/// blurb ending in "Read More") when it slipped through.
+pub fn strip_genius_header(text: &str) -> String {
+    let head: String = text.chars().take(2500).collect();
+    let starts_like_header = head.lines().take(3).any(|line| {
+        let line = line.trim();
+        line.ends_with("Contributors") || line.ends_with("Contributor") || line == "Translations"
+    });
+    if starts_like_header && let Some(at) = head.find("Read More") {
+        return text[at + "Read More".len()..].trim().to_owned();
+    }
+    text.trim().to_owned()
+}
+
+pub fn genius_text(html: &str) -> String {
+    let doc = scraper::Html::parse_document(html);
+    let selector = scraper::Selector::parse("[data-lyrics-container='true']").unwrap();
+    let blocks: Vec<String> = doc
+        .select(&selector)
+        .map(|el| {
+            let mut out = String::new();
+            block_text(el, &mut out);
+            out.trim().to_owned()
+        })
+        .collect();
+    strip_genius_header(&blocks.join("\n\n"))
+}
+
+#[cfg(test)]
+mod genius_tests {
+    use super::*;
+
+    #[test]
+    fn the_page_header_is_not_part_of_the_lyrics() {
+        let html = r#"<div data-lyrics-container="true"><div data-exclude-from-selection="true">
+            <div>39 Contributors</div><div>Translations</div><div>Deutsch</div>
+            <div>FALLEN ANGEL Lyrics</div><div>A blurb about the song... <button>Read More</button></div></div>
+            [Verse 1]<br/>Feel the breeze in my <a href="/x"><span>fingers</span></a><br/>Second line</div>"#;
+        assert_eq!(genius_text(html), "[Verse 1]\nFeel the breeze in my fingers\nSecond line");
+    }
+
+    #[test]
+    fn a_header_without_the_marker_is_cut_at_read_more() {
+        let text = "39 Contributors\nTranslations\nDeutsch\nTitle Lyrics\nA blurb\nRead More\n\n[Verse 1]\nWords here";
+        assert_eq!(strip_genius_header(text), "[Verse 1]\nWords here");
+        let plain = "[Verse 1]\nNo header, Read More is a lyric";
+        assert_eq!(strip_genius_header(plain), plain);
     }
 }

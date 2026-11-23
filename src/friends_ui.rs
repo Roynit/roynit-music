@@ -336,9 +336,10 @@ impl App {
     /// Discord-style profile that opens from your status card: cover, name, bio, what you are playing,
     /// then Edit profile, your status and your Orbs.
     fn own_profile_popover(&mut self, ui: &mut egui::Ui) {
-        ui.set_width(300.);
+        // As wide as the Direct Messages column it opens from.
+        ui.set_width(190.);
         ui.spacing_mut().item_spacing.y = 4.;
-        let (banner, _) = ui.allocate_exact_size(egui::vec2(300., 84.), egui::Sense::hover());
+        let (banner, _) = ui.allocate_exact_size(egui::vec2(190., 64.), egui::Sense::hover());
         let top = egui::CornerRadius { nw: 10, ne: 10, sw: 0, se: 0 };
         let tint = roy_account_ui::tint_for(self.roy_account.name());
         ui.painter().rect_filled(
@@ -354,18 +355,18 @@ impl App {
             Self::paint_cover(ui, banner, &uri, top);
         }
         let ring = ui.visuals().window_fill;
-        let art = egui::Rect::from_min_size(banner.left_bottom() + egui::vec2(14., -34.), egui::vec2(72., 72.));
-        ui.painter().circle_filled(art.center(), 40., ring);
+        let art = egui::Rect::from_min_size(banner.left_bottom() + egui::vec2(12., -28.), egui::vec2(60., 60.));
+        ui.painter().circle_filled(art.center(), 33., ring);
         roy_account_ui::paint_avatar(ui, &self.roy_account, art);
         let hidden = self.social.invisible;
-        let dot = art.right_bottom() - egui::vec2(9., 9.);
-        ui.painter().circle_filled(dot, 10.5, ring);
-        ui.painter().circle_filled(dot, 7.5, if hidden { OFFLINE } else { GREEN });
-        ui.add_space(42.);
-        egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 0)).show(ui, |ui| {
-            ui.set_width(272.);
-            ui.label(RichText::new(self.roy_account.name()).size(20.).bold());
-            ui.label(RichText::new(format!("@{}", self.roy_account.username())).color(MUTED));
+        let dot = art.right_bottom() - egui::vec2(8., 8.);
+        ui.painter().circle_filled(dot, 9., ring);
+        ui.painter().circle_filled(dot, 6.5, if hidden { OFFLINE } else { GREEN });
+        ui.add_space(36.);
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 0)).show(ui, |ui| {
+            ui.set_width(170.);
+            ui.add(egui::Label::new(RichText::new(self.roy_account.name()).size(18.).bold()).truncate());
+            ui.add(egui::Label::new(RichText::new(format!("@{}", self.roy_account.username())).color(MUTED)).truncate());
             let bio = self.roy_account.bio().to_owned();
             if !bio.is_empty() {
                 ui.add_space(4.);
@@ -387,7 +388,7 @@ impl App {
                 egui::Frame::new()
                     .fill(Color32::from_white_alpha(10))
                     .corner_radius(10)
-                    .inner_margin(egui::Margin::same(12))
+                    .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(RichText::new("LISTENING TO").small().bold().color(MUTED));
@@ -404,7 +405,7 @@ impl App {
                     ui.set_width(ui.available_width());
                     ui.spacing_mut().item_spacing.y = 2.;
                     let row = |ui: &mut egui::Ui, text: &str| {
-                        let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.), egui::Sense::click());
+                        let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.), egui::Sense::click());
                         if response.hovered() {
                             ui.painter().rect_filled(rect, 8., Color32::from_white_alpha(14));
                         }
@@ -412,7 +413,7 @@ impl App {
                             rect.left_center() + egui::vec2(10., 0.),
                             egui::Align2::LEFT_CENTER,
                             text,
-                            egui::FontId::proportional(15.),
+                            egui::FontId::proportional(14.),
                             ui.visuals().text_color(),
                         );
                         response
@@ -421,19 +422,17 @@ impl App {
                         self.roy_account.start_editing();
                         ui.close();
                     }
-                    ui.horizontal(|ui| {
-                        ui.add_space(10.);
-                        ui.label("Status");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.add_space(6.);
-                            if ui.selectable_label(hidden, "Invisible").clicked() {
-                                self.social.set_invisible(true);
-                            }
-                            if ui.selectable_label(!hidden, "Online").clicked() {
-                                self.social.set_invisible(false);
-                            }
-                        });
-                    });
+                    // One tap switches between Online and Invisible.
+                    let status = row(ui, if hidden { "      Invisible" } else { "      Online" });
+                    let centre = status.rect.left_center() + egui::vec2(19., 0.);
+                    ui.painter().circle_filled(centre, 5.5, if hidden { OFFLINE } else { GREEN });
+                    if status
+                        .on_hover_text("Tap to switch between Online and Invisible")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        self.social.set_invisible(!hidden);
+                    }
                     let orbs = self.roy_account.orbs();
                     let response = row(ui, &format!("      {orbs} Orbs"));
                     // A small diamond stands in for the Orbs icon.

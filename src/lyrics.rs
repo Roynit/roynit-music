@@ -323,7 +323,13 @@ pub fn fetch_source(
     let path = cache_path(root, title, artist);
     if path.is_file() {
         let cached: Value = serde_json::from_reader(std::fs::File::open(&path)?)?;
-        if source == "auto" || !online || cached["source"] == source || cached["source"] == "custom"
+        // Genius lyrics saved with the page header ("39 Contributors ... Read More") are fetched again.
+        let stale = cached["source"] == "genius"
+            && cached["text"]
+                .as_str()
+                .is_some_and(|t| crate::lyric_providers::strip_genius_header(t) != t.trim());
+        if !stale
+            && (source == "auto" || !online || cached["source"] == source || cached["source"] == "custom")
         {
             return Ok(cached);
         }
