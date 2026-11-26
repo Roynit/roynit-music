@@ -1,3 +1,10 @@
+# Roy Music 0.2.7
+
+- Friends: "People you may know" suggests friends of your friends, with one click to add.
+- Your library now follows your account automatically; the manual sync buttons and switch are gone.
+- Roomier menus and drop-downs with a soft shadow.
+- Smoother playback of long songs and a fix for the crop slider.
+
 # Roy Music 0.2.6
 
 - Roy Music can start with Windows, on by default. It opens quietly in the tray, so no window pops up when you sign in. Turn it off in Settings → Playback → "Start with Windows" or in Task Manager → Startup apps; either way the switch in Settings follows.
