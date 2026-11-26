@@ -17,7 +17,7 @@ import java.security.MessageDigest
  * then checks that it is signed with the same key as the app already installed.
  */
 object Updater {
-    private const val RELEASES = "https://api.github.com/repos/Roynit/roynit-music/releases?per_page=15"
+    private const val RELEASES = "https://api.github.com/repos/Roynit/roynit-music/releases?per_page=60"
     private const val DOWNLOADS = "https://github.com/Roynit/roynit-music/releases/download/"
     private const val ASSET = "roy-music-android-arm64.apk"
 
@@ -46,19 +46,24 @@ object Updater {
 
     /** The newest Android release when it is newer than [current], or null. Call from a worker thread. */
     fun check(current: String): Release? = runCatching {
+        // GitHub lists releases by tag name as text, so "0.1.9" comes before "0.1.11": the first one is not the newest.
+        // Look at every Android release and take the highest version number.
         val releases = JSONArray(String(get(RELEASES)))
+        var best: org.json.JSONObject? = null
         for (i in 0 until releases.length()) {
             val r = releases.getJSONObject(i)
             val tag = r.optString("tag_name")
             if (!tag.startsWith("android-v") || r.optBoolean("draft") || r.optBoolean("prerelease")) continue
-            if (!newer(tag, current)) return null
-            val assets = r.getJSONArray("assets")
-            fun find(name: String): String? = (0 until assets.length()).map { assets.getJSONObject(it) }.firstOrNull { it.optString("name") == name }?.optString("browser_download_url")
-            val apk = find(ASSET)?.takeIf { it.startsWith(DOWNLOADS) } ?: return null
-            val sum = find("$ASSET.sha256")?.takeIf { it.startsWith(DOWNLOADS) } ?: return null
-            return Release(tag.removePrefix("android-v"), apk, sum, r.optString("body"))
+            if (best == null || newer(tag, best.optString("tag_name"))) best = r
         }
-        null
+        val r = best ?: return null
+        val tag = r.optString("tag_name")
+        if (!newer(tag, current)) return null
+        val assets = r.getJSONArray("assets")
+        fun find(name: String): String? = (0 until assets.length()).map { assets.getJSONObject(it) }.firstOrNull { it.optString("name") == name }?.optString("browser_download_url")
+        val apk = find(ASSET)?.takeIf { it.startsWith(DOWNLOADS) } ?: return null
+        val sum = find("$ASSET.sha256")?.takeIf { it.startsWith(DOWNLOADS) } ?: return null
+        Release(tag.removePrefix("android-v"), apk, sum, r.optString("body"))
     }.getOrNull()
 
     /** The release notes cut down to the main points: a few short lines, no markdown. */

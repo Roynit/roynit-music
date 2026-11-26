@@ -1,6 +1,4 @@
 # Roy Music for Android
 
-- Message notifications at once, even when the app is closed, with Reply and a quick icon button right on the notification.
-- Round floating chat bubbles like Messenger's (switch on or off in your profile).
-- Quick icon for each friend, shared by both of you and on every device: hold the button beside the message box to change it.
-- Tapping a message notification opens Friends.
+- Fixed updates: the app now finds the newest version even when older numbers are listed first, so you get every update from now on.
+- Includes everything from 0.1.10 and 0.1.11: instant message notifications, Reply and a quick icon on notifications, floating chat bubbles and a quick icon shared with each friend.
