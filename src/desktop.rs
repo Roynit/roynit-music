@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod friends;
+mod crop_ui;
 mod friends_ui;
 mod import_ui;
 mod reorder_ui;
@@ -782,6 +783,10 @@ impl App {
         }
         match tag {
             "account-merged" => self.roynit_merge_complete(),
+            "account-reset" => {
+                self.roy_account.library_reset();
+                self.reset_mixes();
+            }
             "update" | "update-silent" => {
                 self.update_info = data;
                 if tag == "update" {
@@ -1730,6 +1735,7 @@ impl App {
                         ["Title", "Artist", "Duration"][self.library_sort]
                     ))
                     .show_ui(ui, |ui| {
+                        menu_style(ui);
                         for (i, label) in ["Title", "Artist", "Duration"].iter().enumerate() {
                             ui.selectable_value(&mut self.library_sort, i, *label);
                         }
@@ -2137,6 +2143,7 @@ impl App {
                         self.send("append", "queue.append", json!({"tracks":ids}));
                     }
                     ui.menu_button("Add to playlist", |ui| {
+                        menu_style(ui);
                         for playlist in self.library.playlists.values().cloned().collect::<Vec<_>>() {
                             if ui.button(&playlist.name).clicked() {
                                 let mut value = playlist.clone();
@@ -2203,6 +2210,7 @@ impl App {
     }
     fn import_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("Import", |ui| {
+            menu_style(ui);
             if ui.button("Audio files…").clicked() {
                 self.import(false);
                 ui.close();
@@ -2284,6 +2292,7 @@ impl App {
     ) {
         ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
         let menu = ui.menu_button(RichText::new("•••").size(14.).color(MUTED), |ui| {
+            menu_style(ui);
             if reorder {
                 if index > 0 && ui.button("Move up").clicked() {
                     self.move_track(index, index - 1);
@@ -2426,7 +2435,7 @@ impl App {
         cover: &str,
         radius: impl Into<egui::CornerRadius>,
     ) {
-        let image = egui::Image::new(cover);
+        let image = egui::Image::new(thumb(cover));
         let uv = image
             .load_for_size(ui.ctx(), rect.size())
             .ok()
@@ -2641,7 +2650,7 @@ impl App {
         if let Some(tint) = tints.get(uri) {
             return *tint;
         }
-        if let Ok(egui::load::BytesPoll::Ready { bytes, .. }) = ctx.try_load_bytes(uri) {
+        if let Ok(egui::load::BytesPoll::Ready { bytes, .. }) = ctx.try_load_bytes(&thumb(uri)) {
             tints.insert(uri.to_owned(), None);
             let (tints, uri, bytes, ctx) = (
                 self.cover_tints.clone(),
@@ -2662,7 +2671,7 @@ impl App {
     fn artwork(&self, ui: &mut egui::Ui, cover: Option<&str>, size: f32, opacity: f32) {
         if let Some(cover) = cover {
             ui.add(
-                egui::Image::new(cover)
+                egui::Image::new(thumb(cover))
                     .fit_to_exact_size(egui::vec2(size, size))
                     .corner_radius((size / 7.) as u8)
                     .tint(Color32::WHITE.gamma_multiply(opacity)),
@@ -4306,6 +4315,7 @@ impl App {
             };
             egui::Popup::menu(&dots_response).show(menu);
             response.context_menu(|ui| {
+                menu_style(ui);
                 if ui.button("Open playlist").clicked() {
                     open = Some((row.key.clone(), row.name.clone()));
                     ui.close();
@@ -5007,6 +5017,7 @@ impl App {
 
     fn app_menu(&mut self, ui: &mut egui::Ui) {
         let menu = ui.menu_button(RichText::new("•••").size(18.), |ui| {
+            menu_style(ui);
             ui.set_width(166.);
             if self
                 .nav_item(ui, "👤", "Roynit ID", self.page == Page::Profile)
@@ -5481,6 +5492,7 @@ impl App {
                 })
                 .width(220.)
                 .show_ui(ui, |ui| {
+                    menu_style(ui);
                     ui.selectable_value(&mut self.selected_device, String::new(), "System default");
                     for name in self.devices.clone() {
                         ui.selectable_value(&mut self.selected_device, name.clone(), name);
@@ -5671,6 +5683,7 @@ impl App {
                 egui::ComboBox::from_id_salt("download-format")
                     .selected_text(&format)
                     .show_ui(ui, |ui| {
+                        menu_style(ui);
                         for value in ["opus", "mp3", "flac", "m4a", "wav"] {
                             ui.selectable_value(&mut format, value.into(), value);
                         }
@@ -5737,6 +5750,7 @@ impl App {
                     "Dark"
                 })
                 .show_ui(ui, |ui| {
+                    menu_style(ui);
                     ui.selectable_value(&mut self.appearance.mode, "dark".into(), "Dark");
                     ui.selectable_value(&mut self.appearance.mode, "light".into(), "Light");
                 });
@@ -5771,6 +5785,7 @@ impl App {
                     _ => "Wave",
                 })
                 .show_ui(ui, |ui| {
+                    menu_style(ui);
                     for (value, label) in
                         [("waveform", "Wave"), ("hidden", "Hidden")]
                     {
@@ -5828,6 +5843,7 @@ impl App {
         };
         Self::row(ui, q, name, hint, "account sign in login oauth", |ui| {
             ui.menu_button("•••", |ui| {
+                menu_style(ui);
                 if ui.button("Check connection").clicked() {
                     self.send("account-status", "oauth.status", json!({"provider":key}));
                     ui.close();
@@ -5976,6 +5992,7 @@ impl App {
             "scrobble lastfm",
             |ui| {
                 ui.menu_button("•••", |ui| {
+                    menu_style(ui);
                     if ui.button("Authorize").clicked() {
                         self.send(
                             "authorize",
@@ -6036,6 +6053,7 @@ impl App {
                     egui::ComboBox::from_id_salt("oauth-provider")
                         .selected_text(if self.oauth_provider == 0 { "Google" } else { "Spotify" })
                         .show_ui(ui, |ui| {
+                            menu_style(ui);
                             ui.selectable_value(&mut self.oauth_provider, 0, "Google");
                             ui.selectable_value(&mut self.oauth_provider, 1, "Spotify");
                         });
@@ -6112,6 +6130,7 @@ impl App {
                         &self.cookie_browser
                     })
                     .show_ui(ui, |ui| {
+                        menu_style(ui);
                         ui.selectable_value(&mut self.cookie_browser, String::new(), "Off");
                         for browser in ["chrome", "edge", "firefox", "brave", "vivaldi", "opera"] {
                             ui.selectable_value(&mut self.cookie_browser, browser.into(), browser);
@@ -6189,6 +6208,7 @@ impl App {
             let name = theme["name"].as_str().unwrap_or("Theme").to_owned();
             Self::row(ui, q, &name, "", "theme", |ui| {
                 ui.menu_button("•••", |ui| {
+                    menu_style(ui);
                     if ui.button(format!("Delete {name}")).clicked() {
                         self.send("theme", "themes.delete", json!({"id":theme["id"]}));
                         self.send("themes", "themes.list", json!({}));
@@ -6303,6 +6323,7 @@ impl App {
             "version release check download",
             |ui| {
                 ui.menu_button("•••", |ui| {
+                    menu_style(ui);
                     if ui.button("Prepare previous version").clicked() {
                         self.send("update", "updates.rollback", json!({}));
                         ui.close();
@@ -6423,6 +6444,8 @@ impl App {
         };
         style.visuals.selection.stroke.color = contrast;
         style.visuals.widgets.active.bg_fill = accent;
+        style.spacing.menu_margin = egui::Margin::same(6);
+        style.spacing.menu_spacing = 2.;
         style.animation_time = if self.appearance.reduced_motion {
             0.
         } else {
@@ -6849,6 +6872,7 @@ impl App {
                         let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(corner));
                         let menu =
                             ui.menu_button(RichText::new("•••").color(Color32::WHITE), |ui| {
+                                menu_style(ui);
                                 if ui.button("View songs").clicked() {
                                     view = true;
                                     ui.close();
@@ -6905,6 +6929,7 @@ impl App {
             ui.label(RichText::new("From YouTube Music").size(22.).bold());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let menu = ui.menu_button("•••", |ui| {
+                    menu_style(ui);
                     if ui.button("Charts").clicked() {
                         self.send("home", "music.charts", json!({}));
                         ui.close();
@@ -7447,6 +7472,7 @@ impl App {
                             );
                         }
                         let menu = ui.menu_button("•••", |ui| {
+                            menu_style(ui);
                             ui.horizontal(|ui| {
                                 ui.add(
                                     egui::TextEdit::singleline(&mut self.rename_playlist)
@@ -7523,6 +7549,7 @@ impl App {
                     egui::ComboBox::from_id_salt("lyric-source")
                         .selected_text(format!("Source: {}", self.lyric_source))
                         .show_ui(ui, |ui| {
+                            menu_style(ui);
                             for source in
                                 ["auto", "lrclib", "netease", "kugou", "musixmatch", "genius"]
                             {
@@ -7749,6 +7776,14 @@ impl eframe::App for App {
                 roy_account_ui::Event::Drop(provider) => {
                     self.send("logout", "oauth.logout", json!({"provider":provider.key()}))
                 }
+                roy_account_ui::Event::Reset => {
+                    self.send("account-reset", "account.music.reset", json!({}))
+                }
+                roy_account_ui::Event::Merge(snapshot) => self.send(
+                    "account-merged",
+                    "account.music.merge",
+                    json!({"snapshot":snapshot}),
+                ),
             }
         }
         self.roynit_gate(ctx);
@@ -7987,6 +8022,24 @@ impl eframe::App for App {
         }
     }
 }
+/// Covers are asked for at the size they are drawn: Google's picture servers resize on request, and a 400 px copy
+/// is a fraction of the original, so lists and cards fill in quickly. Every place that shows a cover uses this same
+/// address, so each picture is downloaded once.
+fn thumb(url: &str) -> String {
+    if url.contains("googleusercontent.com") || url.contains("ggpht.com") {
+        let slash = url.rfind('/').unwrap_or(0);
+        let base = match url[slash..].rfind('=') {
+            Some(at) if url[slash + at + 1..].starts_with(['w', 's']) => &url[..slash + at],
+            _ => url,
+        };
+        return format!("{base}=w400-h400-l90-rj");
+    }
+    if url.contains("ytimg.com") {
+        return url.replace("maxresdefault", "hqdefault").replace("sddefault", "hqdefault");
+    }
+    url.to_owned()
+}
+
 fn playback_status(state: &Value) -> &'static str {
     if state["pending_track_id"].is_string() {
         "Reconnecting audio…"
@@ -8025,6 +8078,13 @@ const AQUA: Color32 = Color32::from_rgb(0x78, 0xDD, 0xDA);
 const ARTWORK_FADE: f32 = 0.18;
 /// Below this window width the side panel only opens on request from the player bar.
 const SIDE_PANEL_MIN_WINDOW: f32 = 1080.;
+/// Roomier rows for every menu and drop-down: a comfortable width, taller items and a little air between them.
+pub(crate) fn menu_style(ui: &mut egui::Ui) {
+    ui.set_min_width(200.);
+    let spacing = ui.spacing_mut();
+    spacing.button_padding = egui::vec2(12., 8.);
+    spacing.item_spacing.y = 2.;
+}
 fn graphite_visuals() -> egui::Visuals {
     let mut v = egui::Visuals::dark();
     v.panel_fill = GRAPHITE;
@@ -8036,6 +8096,9 @@ fn graphite_visuals() -> egui::Visuals {
     v.window_stroke = egui::Stroke::new(1.0_f32, Color32::from_white_alpha(18));
     v.window_corner_radius = 14.into();
     v.menu_corner_radius = 10.into();
+    // Menus and pop-ups float: a soft shadow and a faint edge lift them off the page.
+    v.popup_shadow = egui::epaint::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(150) };
+    v.window_shadow = egui::epaint::Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(160) };
     let line = egui::Stroke::new(1.0_f32, Color32::from_white_alpha(14));
     for (w, fill) in [
         (&mut v.widgets.noninteractive, GRAPHITE),

@@ -36,7 +36,8 @@ pub mod translation;
 pub mod updates;
 pub mod vault;
 pub mod youtube;
-mod youtube_stream;
+pub mod sources;
+pub mod youtube_stream;
 
 use anyhow::{Context, Result, ensure};
 use model::{Effects, PlayEvent, Playlist, Repeat, Track};
@@ -2140,6 +2141,23 @@ impl Engine {
                 )
             }
             "settings.get" => Ok(json!(self.store.data.settings)),
+            "account.music.reset" => {
+                // A different account is signing in: keep the old library in a backup file, then start clean.
+                let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+                let backups = self.store.root.join("backups");
+                std::fs::create_dir_all(&backups)?;
+                self.store
+                    .export(&backups.join(format!("library-before-account-switch-{stamp}.json")))?;
+                let data = &mut self.store.data;
+                data.favorites.clear();
+                data.playlists.clear();
+                data.playlist_order.clear();
+                data.history.clear();
+                data.tracks
+                    .retain(|_, track| track.local_path.is_some() || track.platform == "local");
+                self.store.save()?;
+                Ok(json!(true))
+            }
             "account.music.merge" => {
                 let incoming: account_music::Snapshot = serde_json::from_value(p["snapshot"].clone())?;
                 incoming.merge_into(&mut self.store.data);

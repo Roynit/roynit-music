@@ -204,6 +204,41 @@ test("friends, presence and direct messages", async () => {
   await request("/messages/" + b.account.id, "GET", undefined, a.token, 403);
 });
 
+test("Blend: a friend's songs, friends only, and a switch to keep them private", async () => {
+  const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
+  const password = "local-" + crypto.randomUUID();
+  const make = (tag) => request("/register", "POST", { email: tag + nonce + "@example.test", username: tag + "_" + nonce, password });
+  const [a, b, c] = [await make("ba"), await make("bb"), await make("bc")];
+  const track = (id) => ({ id: "ytmusic:" + id, title: "Song " + id, artist: "Artist", platform: "ytmusic", source: "https://music.youtube.com/watch?v=" + id });
+  const tracks = { "ytmusic:aaaaaaaaaaa": track("aaaaaaaaaaa"), "ytmusic:bbbbbbbbbbb": track("bbbbbbbbbbb") };
+  await request("/music", "PUT", { revision: 0, snapshot: { tracks, playlists: {}, favorites: ["ytmusic:aaaaaaaaaaa"], history: [{ track_id: "ytmusic:bbbbbbbbbbb", started_at: 1 }] } }, b.token);
+  // Not friends yet: nothing to see.
+  await request("/friends/" + b.account.id + "/taste", "GET", undefined, a.token, 403);
+  await request("/friends/request", "POST", { username: b.account.username }, a.token);
+  await request("/friends/accept", "POST", { id: a.account.id }, b.token);
+  const blend = await request("/friends/" + b.account.id + "/taste", "GET", undefined, a.token);
+  assert.deepEqual(blend.tracks.map((t) => t.id), ["ytmusic:aaaaaaaaaaa", "ytmusic:bbbbbbbbbbb"]);
+  // Someone who is not a friend still sees nothing, and the owner can switch sharing off.
+  await request("/friends/" + b.account.id + "/taste", "GET", undefined, c.token, 403);
+  assert.equal((await request("/me", "PATCH", { share_taste: false }, b.token)).account.share_taste, false);
+  await request("/friends/" + b.account.id + "/taste", "GET", undefined, a.token, 403);
+});
+
+test("friend suggestions: friends of friends, most shared first, never people you already know", async () => {
+  const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
+  const password = "local-" + crypto.randomUUID();
+  const make = (tag) => request("/register", "POST", { email: tag + nonce + "@example.test", username: tag + "_" + nonce, password });
+  const [a, b, c, d] = [await make("sa"), await make("sb"), await make("sc"), await make("sd")];
+  const befriend = async (x, y) => { await request("/friends/request", "POST", { username: y.account.username }, x.token); await request("/friends/accept", "POST", { id: x.account.id }, y.token); };
+  assert.deepEqual((await request("/friends/suggestions", "GET", undefined, a.token)).suggestions, []);
+  await befriend(a, b); await befriend(b, c); await befriend(a, d); await befriend(d, c);
+  const list = (await request("/friends/suggestions", "GET", undefined, a.token)).suggestions;
+  assert.deepEqual(list.map((p) => [p.id, p.mutual]), [[c.account.id, 2]]);
+  // Once a request is out, they stop being suggested.
+  await request("/friends/request", "POST", { username: c.account.username }, a.token);
+  assert.deepEqual((await request("/friends/suggestions", "GET", undefined, a.token)).suggestions, []);
+});
+
 test("profile cover picture", async () => {
   const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
   const password = "local-" + crypto.randomUUID();

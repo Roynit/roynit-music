@@ -63,6 +63,10 @@ pub enum Event {
     },
     /// The link is gone, so the token derived from it must go too.
     Drop(Provider),
+    /// The cloud library changed elsewhere (the phone, say): merge it into this device.
+    Merge(Value),
+    /// A different account signed in on this device: set the old account's library aside first.
+    Reset,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -95,6 +99,12 @@ enum Action {
 }
 
 pub struct State {
+    owner_file: PathBuf,
+    new_owner: Option<String>,
+    /// No syncing while the previous account's library is being put away.
+    hold_sync: bool,
+    cropper: Option<(super::crop_ui::Cropper, Action)>,
+    next_read: Instant,
     client: Client,
     endpoint: String,
     path: PathBuf,
@@ -188,6 +198,12 @@ impl State {
                 .flatten()
         });
         let mut state = Self {
+            owner_file: root.join("roynit-library-owner"),
+            new_owner: None,
+            hold_sync: false,
+            cropper: None,
+            next_read: Instant::now(),
+            automatic: true,
             client: Client::builder()
                 .timeout(Duration::from_secs(18))
                 .redirect(reqwest::redirect::Policy::none())
@@ -212,7 +228,6 @@ impl State {
             error: false,
             cloud: Value::Null,
             revision: None,
-            automatic: false,
             next_sync: Instant::now(),
             uploaded: None,
             uploading: None,
@@ -259,7 +274,6 @@ impl State {
     }
 
     pub fn sign_out(&mut self) {
-        self.automatic = false;
         self.request(Action::SignOut, Value::Null);
     }
 
@@ -476,7 +490,6 @@ impl State {
         self.revision = None;
         self.uploaded = None;
         self.uploading = None;
-        self.automatic = false;
         self.editing = false;
         if self.path.is_file() && std::fs::remove_file(&self.path).is_err() {
             self.notice(
@@ -516,34 +529,60 @@ impl State {
         Some(format!("{}/banner/{}?v={version}", self.endpoint, self.profile["id"].as_str()?))
     }
 
-    fn choose_banner(&mut self) {
+    fn choose_banner(&mut self, ctx: &egui::Context) {
+        self.choose(ctx, false);
+    }
+
+    fn choose_avatar(&mut self, ctx: &egui::Context) {
+        self.choose(ctx, true);
+    }
+
+    /// Pick a file, then let the user choose which part of it to keep.
+    fn choose(&mut self, ctx: &egui::Context, avatar: bool) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Pictures", &["jpg", "jpeg", "png", "webp"])
             .pick_file()
         else {
             return;
         };
-        match prepare_banner(&path) {
-            Ok(bytes) => self.request_with(Action::Banner, Value::Null, Some(bytes)),
+        let (circle, size, title, action) = if avatar {
+            (true, (256, 256), "Crop your profile picture", Action::Avatar)
+        } else {
+            (false, (960, 320), "Crop your cover", Action::Banner)
+        };
+        match super::crop_ui::Cropper::new(ctx, &path, circle, size, title) {
+            Ok(cropper) => self.cropper = Some((cropper, action)),
             Err(error) => self.notice(error, true),
         }
     }
 
-    fn choose_avatar(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Pictures", &["jpg", "jpeg", "png", "webp"])
-            .pick_file()
-        else {
+    /// Shows the cropper while one is open, and uploads what was chosen.
+    fn crop_dialog(&mut self, ctx: &egui::Context) {
+        let Some((cropper, action)) = self.cropper.as_mut() else {
             return;
         };
-        match prepare_avatar(&path) {
-            Ok(bytes) => self.request_with(Action::Avatar, Value::Null, Some(bytes)),
-            Err(error) => self.notice(error, true),
+        let action = *action;
+        match cropper.show(ctx) {
+            super::crop_ui::Outcome::Open => {}
+            super::crop_ui::Outcome::Cancel => self.cropper = None,
+            super::crop_ui::Outcome::Done(picture) => {
+                self.cropper = None;
+                let bytes = if action == Action::Avatar {
+                    encode_avatar(&picture)
+                } else {
+                    encode_banner(&picture)
+                };
+                match bytes {
+                    Ok(bytes) => self.request_with(action, Value::Null, Some(bytes)),
+                    Err(error) => self.notice(error, true),
+                }
+            }
         }
     }
 
     fn accept_account(&mut self, data: Value) {
         self.profile = data["account"].clone();
+        self.claim_library();
         self.sync_fields();
         if let Some(token) = data["token"].as_str() {
             self.token = Some(token.to_owned());
@@ -746,7 +785,12 @@ impl State {
                                     self.revision = Some(0);
                                 } else if self.revision != self.cloud["revision"].as_u64() {
                                     self.revision = None;
-                                    self.automatic = false;
+                                    // Merge it in at once; the next upload then carries both.
+                                    if self.automatic
+                                        && let Some(snapshot) = self.cloud.get("snapshot").cloned()
+                                    {
+                                        self.events.push(Event::Merge(snapshot));
+                                    }
                                 }
                             }
                             Action::WriteMusic => {
@@ -801,7 +845,6 @@ impl State {
                             if status == Some(StatusCode::CONFLICT) && action == Action::WriteMusic
                             {
                                 self.revision = None;
-                                self.automatic = false;
                                 self.request(Action::ReadMusic, Value::Null);
                             }
                             let unsupported =
@@ -872,10 +915,57 @@ impl State {
             }
             return;
         }
-        if self.automatic && self.revision.is_some() && Instant::now() >= self.next_sync {
+        if self.automatic
+            && !self.hold_sync
+            && self.token.is_some()
+            && !self.profile.is_null()
+            && self.pending.is_none()
+            && self.todo.is_empty()
+            && Instant::now() >= self.next_read
+        {
+            // The first look right after signing in, then every minute and a half for what the phone changed.
+            self.next_read = Instant::now()
+                + Duration::from_secs(if self.revision.is_none() { 20 } else { 90 });
+            self.request(Action::ReadMusic, Value::Null);
+        }
+        if self.automatic && !self.hold_sync && self.revision.is_some() && Instant::now() >= self.next_sync {
             self.next_sync = Instant::now() + Duration::from_secs(25);
             self.upload(library, false);
         }
+    }
+
+    /// The library on this device belongs to one account. When a different account signs in, the old library is
+    /// backed up and cleared, so one person's likes and playlists never end up in another person's cloud.
+    fn claim_library(&mut self) {
+        let Some(id) = self.profile["id"].as_str().map(str::to_owned) else {
+            return;
+        };
+        let owner = std::fs::read_to_string(&self.owner_file).ok().map(|text| text.trim().to_owned());
+        match owner {
+            Some(owner) if !owner.is_empty() && owner != id => {
+                self.hold_sync = true;
+                self.new_owner = Some(id);
+                self.revision = None;
+                self.cloud = Value::Null;
+                self.uploaded = None;
+                self.uploading = None;
+                self.events.push(Event::Reset);
+            }
+            Some(owner) if owner == id => {}
+            _ => {
+                let _ = std::fs::write(&self.owner_file, id);
+            }
+        }
+    }
+
+    /// The old library has been put away: the new account's own cloud library can come in.
+    pub(super) fn library_reset(&mut self) {
+        if let Some(id) = self.new_owner.take() {
+            let _ = std::fs::write(&self.owner_file, id);
+        }
+        self.hold_sync = false;
+        self.next_read = Instant::now();
+        self.notice("Signed in. This device now shows this account's library.", false);
     }
 
     fn upload(&mut self, library: &Library, force: bool) {
@@ -898,6 +988,30 @@ use super::{App, MUTED, TEXT, Weight};
 use eframe::egui::{self, Color32, RichText};
 
 /// Crop to the middle square, shrink to 256 px and re-encode, so uploads stay small whatever the source.
+/// A cropped square, saved as a small JPEG.
+fn encode_avatar(square: &image::RgbImage) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 88)
+        .encode_image(square)
+        .map_err(|_| "Could not prepare that picture.".to_owned())?;
+    Ok(out)
+}
+
+/// A cropped cover strip, saved as a JPEG that fits the server's limit.
+fn encode_banner(strip: &image::RgbImage) -> Result<Vec<u8>, String> {
+    for quality in [86, 74, 60] {
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality)
+            .encode_image(strip)
+            .map_err(|_| "Could not prepare that picture.".to_owned())?;
+        if out.len() <= 380_000 {
+            return Ok(out);
+        }
+    }
+    Err("That picture is too detailed. Try a simpler one.".into())
+}
+
+#[cfg(test)]
 fn prepare_avatar(path: &std::path::Path) -> Result<Vec<u8>, String> {
     if std::fs::metadata(path)
         .map_err(|_| "Could not read that file.")?
@@ -929,6 +1043,7 @@ fn prepare_avatar(path: &std::path::Path) -> Result<Vec<u8>, String> {
 }
 
 /// Crop to a wide 3:1 strip, shrink to 960 px and re-encode, so the cover stays small and fits any card.
+#[cfg(test)]
 fn prepare_banner(path: &std::path::Path) -> Result<Vec<u8>, String> {
     if std::fs::metadata(path).map_err(|_| "Could not read that file.")?.len() > 25_000_000 {
         return Err("Choose a picture under 25 MB.".into());
@@ -1396,7 +1511,7 @@ impl App {
                         Color32::from_white_alpha((255. * hover) as u8),
                     );
                     if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        account.choose_banner();
+                        account.choose_banner(ctx);
                     }
                     if account.banner_uri().is_some() && ui.small_button("Remove cover").clicked() {
                         account.request(Action::BannerRemove, Value::Null);
@@ -1404,13 +1519,13 @@ impl App {
                     ui.add_space(8.);
                     ui.horizontal(|ui| {
                         if avatar(ui, account, 128., true).clicked() {
-                            account.choose_avatar();
+                            account.choose_avatar(ctx);
                         }
                         ui.add_space(8.);
                         ui.vertical(|ui| {
                             ui.add_space(22.);
                             if ui.button("Choose photo").clicked() {
-                                account.choose_avatar();
+                                account.choose_avatar(ctx);
                             }
                             if account.avatar_uri().is_some() && ui.button("Remove photo").clicked()
                             {
@@ -1481,6 +1596,7 @@ impl App {
                     });
                 });
             });
+        account.crop_dialog(ctx);
         if open_security {
             account.editing = false;
             account.open_security();
@@ -1804,7 +1920,6 @@ impl App {
             }
             ui.add_enabled_ui(account.pending.is_none(), |ui| {
                 if outline_button(ui, "Sign out").clicked() {
-                    account.automatic = false;
                     account.request(Action::SignOut, Value::Null);
                 }
             });
@@ -1848,34 +1963,13 @@ impl App {
             });
         }
         ui.add_space(26.);
-        let mut merge = None;
         ui.scope(|ui| {
             ui.set_max_width(640.);
             card(ui).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new("Music sync").size(19.).bold());
                 muted(ui,"Sync online tracks from listening history, liked songs and playlists. History helps shape your mixes.");
-                ui.add_enabled_ui(account.pending.is_none(), |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        if account.cloud["revision"].as_u64().is_some_and(|revision| revision > 0) {
-                            if let Some(snapshot) = account.cloud.get("snapshot") {
-                                if ui.button("Merge cloud library").clicked() {
-                                    merge = Some(snapshot.clone());
-                                }
-                            } else if ui.button("Refresh cloud library").clicked() {
-                                account.request(Action::ReadMusic,Value::Null);
-                            }
-                        } else if account.revision.is_none() && ui.button("Check cloud library").clicked() {
-                            account.request(Action::ReadMusic,Value::Null);
-                        }
-                        if account.revision.is_some() && ui.button("Sync this device").clicked() {
-                            account.upload(&self.library,true);
-                        }
-                    });
-                    if account.revision.is_some() {
-                        ui.checkbox(&mut account.automatic, "Auto-sync on this device for this session");
-                    }
-                });
+                muted(ui,"Your library follows your account on every device, and is kept in step automatically.");
                 if account.pending.is_some() { ui.spinner(); }
             });
             ui.add_space(12.);
@@ -1896,13 +1990,6 @@ impl App {
                 }
             });
         });
-        if let Some(snapshot) = merge {
-            self.send(
-                "account-merged",
-                "account.music.merge",
-                json!({"snapshot":snapshot}),
-            );
-        }
         if connected {
             self.settings_group = 3;
             self.settings_query.clear();

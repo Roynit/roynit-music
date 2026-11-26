@@ -175,6 +175,7 @@ impl App {
                     "Create new playlist"
                 })
                 .show_ui(ui, |ui| {
+                    super::menu_style(ui);
                     ui.selectable_value(
                         &mut self.import_to_favorites,
                         false,

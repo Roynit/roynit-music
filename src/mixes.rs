@@ -258,6 +258,12 @@ pub(crate) fn validate_tracks(value: &Value) -> Result<Vec<Track>> {
     Ok(tracks)
 }
 
+/// "Made for you", "Discover", "On repeat" and the recommended picks, built from a library (favourites and
+/// history) alone: what the phone app calls, since it has no YouTube account session.
+pub fn for_library(music: &Music<'_>, library: &Library, now: u64) -> Result<Value> {
+    account_mixes(music, None, &taste(library, now))
+}
+
 pub(crate) fn account_mixes(
     music: &Music<'_>,
     token: Option<&str>,

@@ -617,6 +617,7 @@ impl App {
                 });
             ui.add_space(12.);
             ui.menu_button("More", |ui| {
+                super::menu_style(ui);
                 if ui.button("Remove friend").clicked() {
                     let sure = rfd::MessageDialog::new()
                         .set_title("Remove friend?")
@@ -739,6 +740,8 @@ impl App {
                     self.friends_tab = FriendsTab::Add;
                 }
             }
+            ui.add_space(18.);
+            self.suggestions_block(ui);
             return;
         }
         let word = if only_online { "Online" } else { "All friends" };
@@ -757,6 +760,7 @@ impl App {
                         .layout(egui::Layout::right_to_left(egui::Align::Center)),
                 );
                 actions.menu_button(RichText::new("•••").color(MUTED), |ui| {
+                    super::menu_style(ui);
                     if ui.button("Message").clicked() {
                         self.open_friend(&id);
                         ui.close();
@@ -778,6 +782,8 @@ impl App {
                     self.open_friend(&id);
                 }
             }
+            ui.add_space(14.);
+            self.suggestions_block(ui);
         });
     }
 
@@ -814,6 +820,36 @@ impl App {
                 ui.add_space(10.);
             }
         });
+    }
+
+    /// "People you may know": friends of your friends, with how many you share and a one-click Add.
+    fn suggestions_block(&mut self, ui: &mut egui::Ui) {
+        let people: Vec<Person> = self.social.suggestions.clone();
+        if people.is_empty() {
+            return;
+        }
+        ui.label(RichText::new(format!("People you may know — {}", people.len())).small().bold().color(MUTED));
+        ui.add_space(4.);
+        ui.spacing_mut().item_spacing.y = 2.;
+        for person in &people {
+            let mutual = if person.mutual == 1 { "1 mutual friend".to_owned() } else { format!("{} mutual friends", person.mutual) };
+            let line = (format!("@{}  •  {mutual}", person.username), MUTED);
+            let (rect, _) = self.person_row(ui, &format!("suggest-{}", person.id), person, None, line, false, 60., 0);
+            let mut actions = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("suggest-actions", &person.id))
+                    .max_rect(rect.shrink2(egui::vec2(10., 0.)))
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            );
+            let accent = actions.visuals().selection.bg_fill;
+            let on_accent = actions.visuals().selection.stroke.color;
+            let add = egui::Button::new(RichText::new("Add").bold().color(on_accent)).fill(accent).corner_radius(16).min_size(egui::vec2(70., 30.));
+            if actions.add(add).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.social.add_friend(&person.username);
+                self.social.suggestions.retain(|p| p.id != person.id);
+            }
+        }
+        ui.add_space(10.);
     }
 
     fn add_friend(&mut self, ui: &mut egui::Ui) {
@@ -866,6 +902,8 @@ impl App {
         if !me.is_empty() {
             ui.label(RichText::new(format!("Your username is @{me}. Share it so friends can find you.")).color(MUTED));
         }
+        ui.add_space(18.);
+        self.suggestions_block(ui);
     }
 
     fn chat_view(&mut self, ui: &mut egui::Ui, friend: &Friend) {

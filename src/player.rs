@@ -113,6 +113,8 @@ fn open_decoder(
             "1",
             "-reconnect_on_network_error",
             "1",
+            "-reconnect_at_eof",
+            "1",
             "-reconnect_delay_max",
             "3",
         ]);

@@ -18,6 +18,8 @@ pub struct Person {
     pub bio: String,
     pub avatar_version: u64,
     pub banner_version: u64,
+    /// Friends you have in common; only filled in for suggestions.
+    pub mutual: u32,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -80,8 +82,15 @@ pub struct Playing {
     pub playing: bool,
 }
 
+fn now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
 enum Tag {
     Social,
+    Suggest,
     Presence,
     Chat(String),
     Send(String),
@@ -98,6 +107,8 @@ pub struct Social {
     pub friends: Vec<Friend>,
     pub incoming: Vec<Person>,
     pub outgoing: Vec<Person>,
+    /// People you may know: friends of your friends.
+    pub suggestions: Vec<Person>,
     pub unread: HashMap<String, u32>,
     pub chats: HashMap<String, Chat>,
     /// Seconds the server clock was ahead of the sender's last heartbeat when the snapshot arrived.
@@ -107,6 +118,7 @@ pub struct Social {
     pub notice: Option<(String, bool)>,
     pub invisible: bool,
     next_social: Instant,
+    next_suggest: Instant,
     next_presence: Instant,
     next_chat: Instant,
     shared: Option<Playing>,
@@ -130,6 +142,7 @@ impl Social {
             friends: Vec::new(),
             incoming: Vec::new(),
             outgoing: Vec::new(),
+            suggestions: Vec::new(),
             unread: HashMap::new(),
             chats: HashMap::new(),
             server_now: 0,
@@ -138,6 +151,7 @@ impl Social {
             notice: None,
             invisible: false,
             next_social: now,
+            next_suggest: now,
             next_presence: now,
             next_chat: now,
             shared: None,
@@ -246,6 +260,9 @@ impl Social {
             return;
         }
         chat.draft.clear();
+        // Show it at once; the server's answer replaces this placeholder (its id is negative).
+        chat.messages.push(Message { id: -1, mine: true, body: body.clone(), at: now_seconds() });
+        chat.stick = true;
         self.call(Tag::Send(id.to_owned()), reqwest::Method::POST, format!("/messages/{id}"), Some(json!({"body":body})));
     }
 
@@ -273,13 +290,17 @@ impl Social {
             self.next_social = now + Duration::from_secs(if watching { 4 } else { 20 });
             self.call(Tag::Social, reqwest::Method::GET, "/social".into(), None);
         }
+        if now >= self.next_suggest && !busy(&self.calls, |t| matches!(t, Tag::Suggest)) {
+            self.next_suggest = now + Duration::from_secs(90);
+            self.call(Tag::Suggest, reqwest::Method::GET, "/friends/suggestions".into(), None);
+        }
         if let Some(id) = open.map(str::to_owned)
             && now >= self.next_chat
             && !busy(&self.calls, |t| matches!(t, Tag::Chat(_)))
         {
-            self.next_chat = now + Duration::from_millis(2500);
+            self.next_chat = now + Duration::from_millis(1200);
             let chat = self.chats.entry(id.clone()).or_default();
-            let after = if chat.loaded { chat.messages.last().map_or(0, |m| m.id) } else { 0 };
+            let after = if chat.loaded { chat.messages.iter().map(|m| m.id).max().unwrap_or(0).max(0) } else { 0 };
             self.call(
                 Tag::Chat(id.clone()),
                 reqwest::Method::GET,
@@ -339,13 +360,22 @@ impl Social {
                     self.loaded = true;
                 }
             }
+            (Tag::Suggest, Ok(data)) => {
+                self.suggestions = serde_json::from_value(data["suggestions"].clone()).unwrap_or_default();
+            }
             (Tag::Chat(id), Ok(data)) => {
                 let fresh: Vec<Message> =
                     serde_json::from_value(data["messages"].clone()).unwrap_or_default();
                 let chat = self.chats.entry(id.clone()).or_default();
-                let last = chat.messages.last().map_or(0, |m| m.id);
-                let any = fresh.iter().any(|m| m.id > last);
-                chat.messages.extend(fresh.into_iter().filter(|m| m.id > last));
+                let last = chat.messages.iter().map(|m| m.id).max().unwrap_or(0);
+                let fresh: Vec<Message> = fresh.into_iter().filter(|m| m.id > last).collect();
+                let any = !fresh.is_empty();
+                for message in fresh.iter().filter(|m| m.mine) {
+                    if let Some(at) = chat.messages.iter().position(|m| m.id < 0 && m.body == message.body) {
+                        chat.messages.remove(at);
+                    }
+                }
+                chat.messages.extend(fresh);
                 chat.loaded = true;
                 chat.stick |= any;
                 if any {
@@ -355,7 +385,10 @@ impl Social {
             (Tag::Send(id), Ok(data)) => {
                 if let Ok(message) = serde_json::from_value::<Message>(data) {
                     let chat = self.chats.entry(id).or_default();
-                    if chat.messages.last().is_none_or(|m| m.id < message.id) {
+                    if let Some(at) = chat.messages.iter().position(|m| m.id < 0 && m.body == message.body) {
+                        chat.messages.remove(at);
+                    }
+                    if chat.messages.iter().all(|m| m.id != message.id) {
                         chat.messages.push(message);
                     }
                     chat.stick = true;
@@ -372,10 +405,18 @@ impl Social {
                 };
                 self.notice = Some((text, false));
                 self.next_social = Instant::now();
+                self.next_suggest = Instant::now();
             }
-            (Tag::Send(_) | Tag::Act(_), Err(error)) => self.notice = Some((error, true)),
+            (Tag::Send(id), Err(error)) => {
+                // It did not go: take the placeholder back out.
+                if let Some(chat) = self.chats.get_mut(&id) {
+                    chat.messages.retain(|m| m.id >= 0);
+                }
+                self.notice = Some((error, true));
+            }
+            (Tag::Act(_), Err(error)) => self.notice = Some((error, true)),
             // A refresh that fails just waits for the next one.
-            (Tag::Social | Tag::Chat(_) | Tag::Presence, _) => {}
+            (Tag::Social | Tag::Suggest | Tag::Chat(_) | Tag::Presence, _) => {}
         }
     }
 }

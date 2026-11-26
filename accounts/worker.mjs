@@ -9,9 +9,9 @@ const now = () => Math.floor(Date.now() / 1000);
 const hex = (bytes) => Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
 const random = () => hex(crypto.getRandomValues(new Uint8Array(32)));
 const digest = async (text) => hex(await crypto.subtle.digest("SHA-256", encoder.encode(text)));
-const publicUser = ({id, email, username, display_name, google_subject, password, orbs, email_verified, bio, avatar_set, avatar_version, banner_set, banner_version, created_at}, base) => ({
+const publicUser = ({id, email, username, display_name, google_subject, password, orbs, share_taste, email_verified, bio, avatar_set, avatar_version, banner_set, banner_version, created_at}, base) => ({
   id, email, username, display_name, provider: google_subject ? "google" : "password",
-  has_password: !!password, has_google: !!google_subject, orbs: orbs || 0, email_verified: !!email_verified,
+  has_password: !!password, has_google: !!google_subject, orbs: orbs || 0, share_taste: share_taste !== 0, email_verified: !!email_verified,
   bio: bio || "", created_at,
   // The version in the URL changes with every upload, so browsers and the app can cache it forever.
   avatar_url: avatar_set ? base + "/avatar/" + id + "?v=" + avatar_version : null,
@@ -629,6 +629,33 @@ async function socialRoute(request, env, user, path, url) {
     ]);
     return reply({ok:true});
   }
+  if (path === "/friends/suggestions" && request.method === "GET") {
+    // People you may know: friends of your friends you have no request with yet, most shared friends first.
+    await rate(env, request, "suggest", 60, user.id);
+    const {results} = await env.DB.prepare(
+      "WITH mine AS (SELECT CASE WHEN low=?1 THEN high ELSE low END AS id FROM friendships WHERE (low=?1 OR high=?1) AND status='accepted'), "
+      + "related AS (SELECT CASE WHEN low=?1 THEN high ELSE low END AS id FROM friendships WHERE low=?1 OR high=?1) "
+      + "SELECT u.id,u.username,u.display_name,u.bio,u.avatar_set,u.avatar_version,u.banner_set,u.banner_version,COUNT(*) AS mutual "
+      + "FROM friendships f JOIN users u ON u.id=CASE WHEN f.low IN (SELECT id FROM mine) THEN f.high ELSE f.low END "
+      + "WHERE f.status='accepted' AND (f.low IN (SELECT id FROM mine) OR f.high IN (SELECT id FROM mine)) "
+      + "AND u.id!=?1 AND u.id NOT IN (SELECT id FROM related) GROUP BY u.id ORDER BY mutual DESC,u.display_name LIMIT 12"
+    ).bind(user.id).all();
+    return reply({suggestions:results.map((row) => ({...person(row), mutual:row.mutual}))});
+  }
+  const taste = path.match(/^\/friends\/([0-9a-f-]{36})\/taste$/);
+  if (taste && request.method === "GET") {
+    // Blend: a friend's most-loved songs, so the app can mix them with yours. Friends only, and only when they allow it.
+    await rate(env, request, "taste", 60, user.id);
+    await requireFriend(env, user.id, taste[1]);
+    const row = await env.DB.prepare("SELECT u.share_taste,u.display_name,m.snapshot FROM users u LEFT JOIN music m ON m.user_id=u.id WHERE u.id=?").bind(taste[1]).first();
+    if (!row || row.share_taste === 0) throw new HttpError(403, "They keep their taste private.");
+    const snapshot = row.snapshot ? JSON.parse(row.snapshot) : {tracks:{}, favorites:[], history:[]};
+    const score = new Map();
+    for (const id of snapshot.favorites || []) score.set(id, (score.get(id) || 0) + 5);
+    for (const event of (snapshot.history || []).slice(-400)) score.set(event.track_id, (score.get(event.track_id) || 0) + 1);
+    const ranked = [...score.entries()].sort((x, y) => y[1] - x[1]).map(([id]) => snapshot.tracks[id]).filter(Boolean).slice(0, 60);
+    return reply({name: row.display_name, tracks: ranked});
+  }
   const chat = path.match(/^\/messages\/([0-9a-f-]{36})$/);
   if (chat) {
     await requireFriend(env, user.id, chat[1]);
@@ -700,6 +727,9 @@ async function route(request, env, ctx) {
       const name = str(body.display_name).trim();
       if (!name || name.length>48 || /[\u0000-\u001f]/.test(name)) throw new HttpError(400,"Enter a display name up to 48 characters.");
       sets.push("display_name=?"); values.push(name);
+    }
+    if ("share_taste" in body) {
+      sets.push("share_taste=?"); values.push(body.share_taste === true ? 1 : 0);
     }
     if ("bio" in body) {
       const bio = str(body.bio).replace(/\s+/g," ").trim();

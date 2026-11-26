@@ -170,6 +170,27 @@ impl Music<'_> {
             json!({"source":"youtube_music","browse_id":id,"generated_mixes":if id=="FEmusic_home"{parse_generated_mixes(&value)}else{vec![]},"authenticated_session":value.pointer("/responseContext/mainAppWebResponseContext/loggedOut").and_then(Value::as_bool).map(|out|!out),"tracks":parse_tracks(&value),"items":parse_items(&value),"continuation":find_continuation(&value)}),
         )
     }
+    /// The page exactly as YouTube Music sends it, for pages whose layout has no parser yet.
+    pub fn browse_raw(&self, id: &str) -> Result<Value> {
+        self.request("browse", json!({"browseId":id}))
+    }
+    /// A podcast show: its name and episodes. Episodes are laid out differently from songs, so they have their own
+    /// reader; each one comes back as a track so the rest of the app can play it like any song.
+    pub fn podcast(&self, id: &str) -> Result<Value> {
+        ensure!(
+            id.len() <= 256 && !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || "_-".contains(c)),
+            "Invalid podcast ID"
+        );
+        let value = self.request("browse", json!({"browseId":id}))?;
+        let mut name = String::new();
+        let mut headers = Vec::new();
+        walk(&value, "musicResponsiveHeaderRenderer", &mut headers);
+        if let Some(header) = headers.first() {
+            name = text(&header["title"]);
+        }
+        let episodes = parse_episodes(&value, &name);
+        Ok(json!({"source":"youtube_music","title":name,"tracks":episodes}))
+    }
     pub fn home(&self) -> Result<Value> {
         self.browse("FEmusic_home", None)
     }
@@ -298,6 +319,43 @@ fn first(value: &Value, key: &str) -> Option<Value> {
     let mut values = Vec::new();
     walk(value, key, &mut values);
     values.into_iter().next()
+}
+/// Podcast episodes (`musicMultiRowListItemRenderer`), as playable tracks named after the show.
+pub fn parse_episodes(value: &Value, show: &str) -> Vec<Track> {
+    let mut rows = Vec::new();
+    walk(value, "musicMultiRowListItemRenderer", &mut rows);
+    let mut seen = HashSet::new();
+    rows.into_iter()
+        .filter_map(|row| {
+            let video = first(&row, "videoId")?.as_str()?.to_owned();
+            if !seen.insert(video.clone()) {
+                return None;
+            }
+            let subtitle = text(&row["subtitle"]);
+            let minutes = |unit: &str| {
+                subtitle
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .windows(2)
+                    .find(|w| w[1].starts_with(unit))
+                    .and_then(|w| w[0].parse::<f64>().ok())
+                    .unwrap_or(0.)
+            };
+            Some(Track {
+                id: format!("youtube:{video}"),
+                title: text(&row["title"]),
+                artist: show.to_owned(),
+                album: subtitle.clone(),
+                duration: minutes("hr") * 3600. + minutes("min") * 60. + minutes("sec"),
+                source: format!("https://music.youtube.com/watch?v={video}"),
+                platform: "ytmusic".into(),
+                cover: first(&row, "thumbnails")
+                    .and_then(|t| t.as_array()?.last()?["url"].as_str().map(str::to_owned)),
+                local_path: None,
+                cache_path: None,
+            })
+        })
+        .collect()
 }
 pub fn parse_tracks(value: &Value) -> Vec<Track> {
     let mut result = Vec::new();

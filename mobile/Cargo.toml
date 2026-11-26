@@ -1,0 +1,25 @@
+[package]
+name = "roy-mobile"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Roy Music core for Android: search and stream links, called from Kotlin through JNI"
+
+[lib]
+name = "roy_mobile"
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1"
+jni = "0.21"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+riff-core = { path = "..", default-features = false }
+serde_json = "1"
+
+# Small and fast to load beats clever: the phone loads this library into a process that also plays music.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "unwind"
+strip = true
