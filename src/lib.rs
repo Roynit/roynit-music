@@ -662,7 +662,11 @@ impl Engine {
                         && request.queue == self.store.data.queue.tracks
                         && let Ok(value) = &job.result
                     {
-                        let tracks: Vec<Track> = serde_json::from_value(value["tracks"].clone())?;
+                        let avoid = mixes::Avoid::new(&self.store.data);
+                        let tracks: Vec<Track> = serde_json::from_value::<Vec<Track>>(value["tracks"].clone())?
+                            .into_iter()
+                            .filter(|t| !avoid.blocks(t))
+                            .collect();
                         let mut known: std::collections::HashSet<_> = request
                             .queue
                             .iter()
@@ -681,7 +685,11 @@ impl Engine {
                         && request.queue == self.store.data.queue.tracks
                         && let Ok(value) = &job.result
                     {
-                        let tracks: Vec<Track> = serde_json::from_value(value["tracks"].clone())?;
+                        let avoid = mixes::Avoid::new(&self.store.data);
+                        let tracks: Vec<Track> = serde_json::from_value::<Vec<Track>>(value["tracks"].clone())?
+                            .into_iter()
+                            .filter(|t| !avoid.blocks(t))
+                            .collect();
                         let mut known: std::collections::HashSet<_> =
                             request.queue.into_iter().collect();
                         let slots = 4096usize.saturating_sub(self.store.data.queue.tracks.len());
@@ -825,7 +833,11 @@ impl Engine {
                     if self.radio.as_ref().is_some_and(|r| {
                         Some(r.generation.as_str()) == result["generation"].as_str()
                     }) {
-                        let tracks: Vec<Track> = serde_json::from_value(result["tracks"].clone())?;
+                        let avoid = mixes::Avoid::new(&self.store.data);
+                        let tracks: Vec<Track> = serde_json::from_value::<Vec<Track>>(result["tracks"].clone())?
+                            .into_iter()
+                            .filter(|t| !avoid.blocks(t))
+                            .collect();
                         let extend = result["extend"] == true;
                         let ids: Vec<_> = tracks
                             .iter()
@@ -1840,6 +1852,27 @@ impl Engine {
                 self.store.save()?;
                 Ok(json!(self.store.data.favorites))
             }
+            "dislikes.set" => {
+                let id = text(p, "id")?;
+                self.store.track(id)?;
+                self.store.data.dislikes.retain(|x| x != id);
+                if boolean(p, "enabled", true) {
+                    self.store.data.dislikes.push(id.into());
+                    // A song cannot be both loved and rejected; it also leaves the upcoming songs and the picks held in reserve.
+                    self.store.data.favorites.retain(|x| x != id);
+                    self.smart_pool.retain(|t| t.id != id);
+                    let current = self.store.data.queue.index;
+                    let queue = &mut self.store.data.queue;
+                    let mut index = 0;
+                    queue.tracks.retain(|t| {
+                        let keep = t != id || current == Some(index);
+                        index += 1;
+                        keep
+                    });
+                }
+                self.store.save()?;
+                Ok(json!(self.store.data.dislikes))
+            }
             "history.clear" => {
                 self.store.data.history.clear();
                 self.store.save()?;
@@ -2345,6 +2378,7 @@ pub const COMMANDS: &[&str] = &[
     "library.remove",
     "library.search",
     "favorites.set",
+    "dislikes.set",
     "history.clear",
     "playlist.save",
     "mix.apply",

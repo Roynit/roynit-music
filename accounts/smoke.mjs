@@ -239,6 +239,22 @@ test("friend suggestions: friends of friends, most shared first, never people yo
   assert.deepEqual((await request("/friends/suggestions", "GET", undefined, a.token)).suggestions, []);
 });
 
+test("dislikes sync with the library and stay out of a Blend", async () => {
+  const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
+  const password = "local-" + crypto.randomUUID();
+  const make = (tag) => request("/register", "POST", { email: tag + nonce + "@example.test", username: tag + "_" + nonce, password });
+  const [a, b] = [await make("da"), await make("db")];
+  const track = (id) => ({ id: "ytmusic:" + id, title: "Song " + id, artist: "Artist", platform: "ytmusic", source: "https://music.youtube.com/watch?v=" + id });
+  const tracks = { "ytmusic:aaaaaaaaaaa": track("aaaaaaaaaaa"), "ytmusic:bbbbbbbbbbb": track("bbbbbbbbbbb") };
+  await request("/music", "PUT", { revision: 0, snapshot: { tracks, playlists: {}, favorites: ["ytmusic:aaaaaaaaaaa"], dislikes: ["ytmusic:bbbbbbbbbbb", "ytmusic:unknown"], history: [{ track_id: "ytmusic:bbbbbbbbbbb", started_at: 1 }] } }, b.token);
+  const saved = await request("/music", "GET", undefined, b.token);
+  assert.deepEqual(saved.snapshot.dislikes, ["ytmusic:bbbbbbbbbbb"]);
+  await request("/friends/request", "POST", { username: b.account.username }, a.token);
+  await request("/friends/accept", "POST", { id: a.account.id }, b.token);
+  const blend = await request("/friends/" + b.account.id + "/taste", "GET", undefined, a.token);
+  assert.deepEqual(blend.tracks.map((t) => t.id), ["ytmusic:aaaaaaaaaaa"]);
+});
+
 test("profile cover picture", async () => {
   const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
   const password = "local-" + crypto.randomUUID();

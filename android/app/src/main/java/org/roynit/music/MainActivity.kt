@@ -413,6 +413,10 @@ class MainActivity : Activity(), SongHost {
         val liked = Library.isFavorite(song.id)
         val options = ArrayList<Sheet.Option>()
         options += Sheet.Option(if (liked) "Remove from liked songs" else "Add to liked songs", if (liked) R.drawable.ic_heart else R.drawable.ic_heart_outline, if (liked) Ui.GREEN else Color.WHITE) { Library.toggleFavorite(song) }
+        val rejected = Library.isDisliked(song.id)
+        options += Sheet.Option(if (rejected) "Remove dislike" else "Dislike (do not suggest)", R.drawable.ic_dislike, if (rejected) 0xFFFF6B6B.toInt() else Color.WHITE) {
+            say(if (Playback.dislike(song)) "Got it. We will not suggest this song again" else "Dislike removed")
+        }
         options += Sheet.Option("Add to playlist", R.drawable.ic_add) { pickPlaylist(song) }
         options += Sheet.Option("Add to queue", R.drawable.ic_queue) { Playback.enqueue(song) }
         options += Sheet.Option("Play next", R.drawable.ic_next) { Playback.playNext(song) }
@@ -434,7 +438,7 @@ class MainActivity : Activity(), SongHost {
 
     private fun radio(song: Song) {
         Thread {
-            val songs = songsOf(JSONObject(Core.radio(song.id, 30))).filter { it.id != song.id }
+            val songs = suggestionsOf(JSONObject(Core.radio(song.id, 30))).filter { it.id != song.id }
             runOnUiThread { if (songs.isNotEmpty()) Playback.play(listOf(song) + songs, 0) }
         }.start()
     }

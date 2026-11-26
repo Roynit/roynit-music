@@ -39,6 +39,22 @@ object Playback {
         if (c.mediaItemCount == 0) play(listOf(song), 0) else c.addMediaItem(c.currentMediaItemIndex + 1, song.toItem())
     }
 
+    /**
+     * Turns a song off, or back on. A song being played that is turned off gives way to the next one, and its other
+     * places in the queue go. Returns whether it is now disliked.
+     */
+    fun dislike(song: Song): Boolean {
+        val disliked = !Library.isDisliked(song.id)
+        Library.toggleDislike(song)
+        val c = controller ?: return disliked
+        if (disliked) {
+            val current = c.currentMediaItemIndex
+            for (i in c.mediaItemCount - 1 downTo 0) if (i != current && c.getMediaItemAt(i).mediaId == song.id) c.removeMediaItem(i)
+            if (c.currentMediaItem?.mediaId == song.id) if (c.hasNextMediaItem()) c.seekToNextMediaItem() else c.pause()
+        }
+        return disliked
+    }
+
     fun enqueue(song: Song) {
         val c = controller ?: return
         if (c.mediaItemCount == 0) play(listOf(song), 0) else c.addMediaItem(song.toItem())

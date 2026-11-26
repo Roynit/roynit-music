@@ -271,6 +271,7 @@ function musicSnapshot(input) {
     }
   }
   return {tracks,playlists,favorites:input.favorites.filter((id)=>typeof id==="string" && tracks[id]),
+    dislikes:(Array.isArray(input.dislikes) ? input.dislikes : []).filter((id)=>typeof id==="string" && tracks[id]).slice(0,2000),
     history:input.history.filter((event)=>event && typeof event.track_id==="string" && tracks[event.track_id] && Number.isSafeInteger(event.started_at))
       .map(({track_id,started_at})=>({track_id,started_at}))};
 }
@@ -652,7 +653,9 @@ async function socialRoute(request, env, user, path, url) {
     const snapshot = row.snapshot ? JSON.parse(row.snapshot) : {tracks:{}, favorites:[], history:[]};
     const score = new Map();
     for (const id of snapshot.favorites || []) score.set(id, (score.get(id) || 0) + 5);
+    for (const id of snapshot.dislikes || []) score.delete(id);
     for (const event of (snapshot.history || []).slice(-400)) score.set(event.track_id, (score.get(event.track_id) || 0) + 1);
+    for (const id of snapshot.dislikes || []) score.delete(id);
     const ranked = [...score.entries()].sort((x, y) => y[1] - x[1]).map(([id]) => snapshot.tracks[id]).filter(Boolean).slice(0, 60);
     return reply({name: row.display_name, tracks: ranked});
   }

@@ -2308,6 +2308,11 @@ impl App {
                 self.radio(track);
                 ui.close();
             }
+            let disliked = self.library.dislikes.contains(&track.id);
+            if ui.button(if disliked { "Remove dislike" } else { "Dislike (do not suggest)" }).clicked() {
+                self.set_dislike(track, !disliked);
+                ui.close();
+            }
             if !track.artist.is_empty() && ui.button("Find artist").clicked() {
                 self.query = track.artist.clone();
                 self.search_source = 0;
@@ -2862,6 +2867,7 @@ impl App {
                 );
                 if let Some(track) = track {
                     self.like_button(ui, track);
+                    self.dislike_button(ui, track);
                 }
             },
         );
@@ -3389,6 +3395,41 @@ impl App {
             self.narrow_open = !wide;
         }
     }
+    /// Turns a song off: it is not suggested again, leaves the queue, and if it is playing the next one starts.
+    fn set_dislike(&mut self, track: &Track, disliked: bool) {
+        self.send("add", "library.add", json!({"track":track}));
+        self.send("dislike", "dislikes.set", json!({"id":track.id,"enabled":disliked}));
+        if disliked && self.current_track().is_some_and(|current| current.id == track.id) {
+            self.send("next", "player.next", json!({}));
+        }
+    }
+    /// A "not for me" button: a circle with a slash, red once pressed. A second press takes it back.
+    fn dislike_button(&mut self, ui: &mut egui::Ui, track: &Track) {
+        let disliked = self.library.dislikes.contains(&track.id);
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(28., 28.), egui::Sense::click());
+        let color = if disliked {
+            Color32::from_rgb(0xED, 0x42, 0x45)
+        } else if response.hovered() {
+            Color32::WHITE
+        } else {
+            MUTED
+        };
+        let center = rect.center();
+        ui.painter().circle_stroke(center, 8., egui::Stroke::new(1.8_f32, color));
+        ui.painter().line_segment(
+            [center + egui::vec2(-5.6, 5.6), center + egui::vec2(5.6, -5.6)],
+            egui::Stroke::new(1.8_f32, color),
+        );
+        response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, disliked, "Dislike"));
+        let response = response.on_hover_text(if disliked {
+            "Disliked: it will not be suggested. Click to undo"
+        } else {
+            "Dislike: do not suggest this song"
+        });
+        if response.clicked() {
+            self.set_dislike(track, !disliked);
+        }
+    }
     fn like_button(&mut self, ui: &mut egui::Ui, track: &Track) {
         let liked = self.library.favorites.contains(&track.id);
         let accent = ui.visuals().selection.bg_fill;
@@ -3662,6 +3703,7 @@ impl App {
                         );
                     });
                     self.like_button(ui, &track);
+                    self.dislike_button(ui, &track);
                 });
                 if !self.lyric_text.is_empty() || !self.lyric_lines.is_empty() {
                     ui.add_space(12.);

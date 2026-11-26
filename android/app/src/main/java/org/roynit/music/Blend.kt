@@ -36,7 +36,7 @@ object Blend {
     fun make(activity: Activity, host: SongHost, friendId: String, friendName: String) {
         activity.say("Blending with $friendName...")
         // Read the library on the main thread, then do the rest away from it.
-        val mine = (Library.favorites + Library.history).distinctBy { it.id }
+        val mine = (Library.favorites + Library.history).distinctBy { it.id }.filter { !Library.isDisliked(it.id) }
         Thread {
             val reply = Account.call("GET", "/friends/$friendId/taste")
             val error = reply.optString("error")
@@ -68,13 +68,13 @@ object Blend {
             // Songs like the ones you share (or like the first of each of you), to widen the mix.
             val seeds = (shared.take(2) + mine.take(1) + theirs.take(1)).distinctBy { it.id }
             for (seed in seeds) {
-                songsOf(runCatching { JSONObject(Core.radio(seed.id, 12)) }.getOrDefault(JSONObject())).take(8).forEach { blend.putIfAbsent(it.id, it) }
+                suggestionsOf(runCatching { JSONObject(Core.radio(seed.id, 12)) }.getOrDefault(JSONObject())).take(8).forEach { blend.putIfAbsent(it.id, it) }
             }
             val myArtists = mine.map { it.artist.lowercase() }.filter { it.isNotEmpty() }.toSet()
             val theirArtists = theirs.map { it.artist.lowercase() }.filter { it.isNotEmpty() }.toSet()
             val union = (myArtists + theirArtists).size.coerceAtLeast(1)
             val match = ((myArtists intersect theirArtists).size * 100 / union).coerceIn(1, 99)
-            val songs = blend.values.toList()
+            val songs = blend.values.filter { !Library.blocks(it) }
             activity.runOnUiThread {
                 val playlist = Library.createPlaylist("Blend: You & $friendName")
                 songs.forEach { Library.addTo(playlist, it) }

@@ -27,6 +27,68 @@ pub(crate) struct Taste {
     pub affinity: HashMap<String, f32>,
     pub recent: HashSet<String>,
     pub favorites: HashSet<String>,
+    #[serde(skip)]
+    pub avoid: Avoid,
+}
+
+/// What the listener does not want suggested. A disliked song is never added by itself (a radio, autoplay or a
+/// mix), but nothing else about its artist or style is thrown out on one thumbs-down: a style holds good songs
+/// and bad ones. An artist gets quieter with each dislike, and is left out of suggestions only after two or
+/// more dislikes that the hearts and plays for that artist do not outweigh. Songs you hearted always stay.
+#[derive(Clone, Debug, Default)]
+pub struct Avoid {
+    disliked: HashSet<String>,
+    favorites: HashSet<String>,
+    strikes: HashMap<String, u32>,
+    demoted: HashSet<String>,
+}
+
+impl Avoid {
+    pub fn new(library: &Library) -> Self {
+        let disliked: HashSet<String> = library.dislikes.iter().cloned().collect();
+        let favorites: HashSet<String> = library.favorites.iter().filter(|id| !disliked.contains(*id)).cloned().collect();
+        let mut strikes = HashMap::<String, u32>::new();
+        for id in &disliked {
+            if let Some(track) = library.tracks.get(id) {
+                *strikes.entry(artist_key(track)).or_default() += 1;
+            }
+        }
+        let mut liking = HashMap::<String, f32>::new();
+        for id in &favorites {
+            if let Some(track) = library.tracks.get(id) {
+                *liking.entry(artist_key(track)).or_default() += 5.;
+            }
+        }
+        let mut plays = HashMap::<String, f32>::new();
+        for event in library.history.iter().rev().take(600) {
+            if let Some(track) = library.tracks.get(&event.track_id) {
+                let seen = plays.entry(artist_key(track)).or_default();
+                *seen = (*seen + 1.).min(20.);
+            }
+        }
+        let demoted = strikes
+            .iter()
+            .filter(|(artist, count)| {
+                **count >= 2 && liking.get(*artist).unwrap_or(&0.) + plays.get(*artist).unwrap_or(&0.) < 4. * **count as f32
+            })
+            .map(|(artist, _)| artist.clone())
+            .collect();
+        Self { disliked, favorites, strikes, demoted }
+    }
+
+    pub fn is_disliked(&self, id: &str) -> bool {
+        self.disliked.contains(id)
+    }
+
+    /// Whether a suggestion should be left out: disliked itself, or by an artist the listener keeps rejecting.
+    pub fn blocks(&self, track: &Track) -> bool {
+        self.disliked.contains(&track.id) || (!self.favorites.contains(&track.id) && self.demoted.contains(&artist_key(track)))
+    }
+
+    /// How much quieter an artist's songs should rank: 1 for no dislikes, then 0.85 per dislike.
+    pub fn softness(&self, track: &Track) -> f32 {
+        0.85_f32.powi(*self.strikes.get(&artist_key(track)).unwrap_or(&0) as i32)
+    }
 }
 
 const SEEDS: usize = 6;
@@ -52,8 +114,15 @@ pub(crate) fn taste(library: &Library, now: u64) -> Taste {
             recent.insert(event.track_id.clone());
         }
     }
-    let favorites: HashSet<String> = library.favorites.iter().cloned().collect();
+    let avoid = Avoid::new(library);
+    for id in &library.dislikes {
+        scores.remove(id.as_str());
+    }
+    let favorites: HashSet<String> = library.favorites.iter().filter(|id| !avoid.is_disliked(id)).cloned().collect();
     for id in &library.favorites {
+        if avoid.is_disliked(id) {
+            continue;
+        }
         // A heart is the clearest signal there is: worth several plays, and it does not fade.
         *scores.entry(id).or_default() += 5.;
     }
@@ -93,7 +162,7 @@ pub(crate) fn taste(library: &Library, now: u64) -> Taste {
     for value in affinity.values_mut() {
         *value /= top;
     }
-    Taste { seeds, rotation, affinity, recent, favorites }
+    Taste { seeds, rotation, affinity, recent, favorites, avoid }
 }
 
 pub(crate) fn generate(music: &Music<'_>, seeds: &[Track]) -> Result<Vec<Mix>> {
@@ -177,7 +246,10 @@ pub(crate) fn blend(mixes: &[Mix], taste: &Taste) -> Vec<Mix> {
     for (rank, mix) in mixes.iter().enumerate() {
         let weight = 0.85_f32.powi(rank as i32);
         for (position, track) in mix.tracks.iter().enumerate() {
-            let vote = weight / (1. + position as f32 / 5.);
+            if taste.avoid.blocks(track) {
+                continue;
+            }
+            let vote = weight / (1. + position as f32 / 5.) * taste.avoid.softness(track);
             scores
                 .entry(track.id.clone())
                 .and_modify(|(score, _)| *score += vote)
@@ -324,7 +396,8 @@ pub(crate) fn account_mixes(
         .iter()
         .flat_map(|mix| mix.tracks.iter().take(2).cloned())
         .collect();
-    let seeds = account_seeds(&likes, &playlist_tracks, &generated_tracks, &local);
+    let mut seeds = account_seeds(&likes, &playlist_tracks, &generated_tracks, &local);
+    seeds.retain(|seed| !taste.avoid.blocks(seed));
     let mut mixes = match generate(music, &seeds) {
         Ok(mixes) => mixes,
         Err(error) if generated.is_empty() => return Err(error),
@@ -552,6 +625,40 @@ mod taste_tests {
         let discover = blended.iter().find(|m| m.name == DISCOVER).unwrap();
         assert!(discover.tracks.iter().all(|t| t.artist != "Known"));
         assert!(discover.tracks.len() <= 24 && for_you.tracks.len() <= 24);
+    }
+
+    #[test]
+    fn one_dislike_removes_the_song_but_not_the_artist_two_demote_the_artist_unless_you_like_them() {
+        let mut library = library(&[("bad1", "Band", NOW - 900), ("bad2", "Band", NOW - 800), ("ok", "Band", NOW - 700)], &[]);
+        library.tracks.insert("other".into(), track("other", "Else"));
+        library.dislikes = vec!["bad1".into()];
+        let avoid = Avoid::new(&library);
+        assert!(avoid.blocks(&track("bad1", "Band")), "the song itself is out");
+        assert!(!avoid.blocks(&track("ok", "Band")), "a good song by the same artist stays");
+        assert!(avoid.softness(&track("ok", "Band")) < 1., "but the artist ranks a little lower");
+        assert!(taste(&library, NOW).seeds.iter().all(|t| t.id != "bad1"), "a disliked song is never a seed");
+
+        library.dislikes = vec!["bad1".into(), "bad2".into()];
+        let avoid = Avoid::new(&library);
+        assert!(avoid.blocks(&track("ok", "Band")), "two dislikes and little love: the artist is left out of suggestions");
+        library.favorites = vec!["ok".into()];
+        let avoid = Avoid::new(&library);
+        assert!(!avoid.blocks(&track("ok", "Band")), "a hearted song always stays");
+        assert!(!avoid.blocks(&track("other", "Else")));
+    }
+
+    #[test]
+    fn disliked_songs_drop_out_of_a_blend() {
+        let mut library = Library::default();
+        library.tracks.insert("x".into(), track("x", "X"));
+        library.dislikes = vec!["x".into()];
+        let mix = Mix {
+            name: "m".into(),
+            tracks: (0..8).map(|i| track(&format!("t{i}"), &format!("A{i}"))).chain([track("x", "X")]).collect(),
+            ..Default::default()
+        };
+        let blended = blend(&[mix], &taste(&library, NOW));
+        assert!(blended.iter().flat_map(|m| &m.tracks).all(|t| t.id != "x"));
     }
 
     #[test]

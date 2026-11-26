@@ -199,6 +199,8 @@ pub struct Library {
     /// The order playlists are shown in; ones missing here (new or imported) follow, sorted by name.
     pub playlist_order: Vec<String>,
     pub favorites: Vec<String>,
+    /// Songs the listener said they do not want suggested: never queued or mixed in by themselves.
+    pub dislikes: Vec<String>,
     pub history: Vec<PlayEvent>,
     pub queue: Queue,
     pub effects: Effects,
@@ -232,6 +234,7 @@ impl Default for Library {
             playlists: BTreeMap::new(),
             playlist_order: vec![],
             favorites: vec![],
+            dislikes: vec![],
             history: vec![],
             queue: Queue::default(),
             effects: Effects::default(),

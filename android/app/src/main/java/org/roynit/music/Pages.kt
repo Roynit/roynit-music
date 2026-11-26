@@ -216,7 +216,7 @@ class HomePage(context: Context, host: SongHost) : Page(context, host) {
         c.say("Listening along with $name...")
         Thread {
             val first = songsOf(JSONObject(Core.search("$title $artist"))).firstOrNull()
-            val rest = if (first == null) emptyList() else songsOf(JSONObject(Core.radio(first.id, 30))).filter { it.id != first.id }
+            val rest = if (first == null) emptyList() else suggestionsOf(JSONObject(Core.radio(first.id, 30))).filter { it.id != first.id }
             post {
                 if (first == null) {
                     c.say("Could not find that song")
@@ -334,7 +334,7 @@ class HomePage(context: Context, host: SongHost) : Page(context, host) {
         }
         c.say("Starting a radio from ${seed.title}...")
         Thread {
-            val songs = listOf(seed) + songsOf(JSONObject(Core.radio(seed.id, 40))).filter { it.id != seed.id }
+            val songs = listOf(seed) + suggestionsOf(JSONObject(Core.radio(seed.id, 40))).filter { it.id != seed.id }
             post { if (songs.size > 1) host.play(songs, 0) else c.say("Could not make a radio right now") }
         }.start()
     }

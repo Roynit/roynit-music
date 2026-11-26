@@ -174,7 +174,7 @@ class PlaybackService : MediaSessionService() {
         loadingMore = true
         val last = player.getMediaItemAt(player.mediaItemCount - 1).mediaId
         Thread {
-            val found = runCatching { songsOf(JSONObject(Core.radio(last, 25))) }.getOrDefault(emptyList())
+            val found = runCatching { suggestionsOf(JSONObject(Core.radio(last, 25))) }.getOrDefault(emptyList())
             main.post {
                 val queued = HashSet<String>()
                 for (i in 0 until player.mediaItemCount) queued += player.getMediaItemAt(i).mediaId

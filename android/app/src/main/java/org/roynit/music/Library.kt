@@ -21,6 +21,9 @@ class PlayEvent(val song: Song, val at: Long)
  */
 object Library {
     val favorites = ArrayList<Song>()
+
+    /** Songs the listener does not want suggested: never queued or mixed in by themselves. */
+    val dislikes = ArrayList<Song>()
     val playlists = ArrayList<Playlist>()
 
     /** Every play, oldest first. */
@@ -54,6 +57,7 @@ object Library {
             if (!f.isFile) return
             val root = JSONObject(f.readText())
             read(root.optJSONArray("favorites"), favorites)
+            read(root.optJSONArray("dislikes"), dislikes)
             val lists = root.optJSONArray("playlists") ?: JSONArray()
             for (i in 0 until lists.length()) {
                 val o = lists.getJSONObject(i)
@@ -85,6 +89,7 @@ object Library {
         val f = file ?: return
         val root = JSONObject()
             .put("favorites", JSONArray(favorites.map { it.toJson() }))
+            .put("dislikes", JSONArray(dislikes.map { it.toJson() }))
             .put("events", JSONArray(events.map { JSONObject().put("song", it.song.toJson()).put("at", it.at) }))
             .put("playlists", JSONArray(playlists.map { JSONObject().put("id", it.id).put("name", it.name).put("songs", JSONArray(it.songs.map { s -> s.toJson() })) }))
         val text = root.toString()
@@ -106,6 +111,7 @@ object Library {
         val f = file
         if (f != null && f.isFile) runCatching { f.copyTo(File(f.parentFile, "library-before-account-switch-${System.currentTimeMillis() / 1000}.json")) }
         favorites.clear()
+        dislikes.clear()
         playlists.clear()
         events.clear()
         changed(sync = false)
@@ -115,8 +121,44 @@ object Library {
 
     fun toggleFavorite(song: Song) {
         val at = favorites.indexOfFirst { it.id == song.id }
-        if (at >= 0) favorites.removeAt(at) else favorites.add(0, song)
+        if (at >= 0) {
+            favorites.removeAt(at)
+        } else {
+            favorites.add(0, song)
+            dislikes.removeAll { it.id == song.id }
+        }
         changed()
+    }
+
+    fun isDisliked(id: String) = dislikes.any { it.id == id }
+
+    /** Turns a song off (or back on). A song cannot be both loved and rejected. */
+    fun toggleDislike(song: Song) {
+        val at = dislikes.indexOfFirst { it.id == song.id }
+        if (at >= 0) {
+            dislikes.removeAt(at)
+        } else {
+            dislikes.add(0, song)
+            favorites.removeAll { it.id == song.id }
+        }
+        changed()
+    }
+
+    /**
+     * Whether a song should be left out of what the app picks for you (radio, autoplay, mixes). The song itself, once
+     * disliked; and the songs of an artist only after two or more dislikes that your hearts and plays of that artist
+     * do not outweigh. A style holds good songs and bad ones, so one thumbs-down never throws a whole artist out, and
+     * a song you hearted always stays. Songs you search for or open yourself are never blocked.
+     */
+    fun blocks(song: Song): Boolean {
+        if (isDisliked(song.id)) return true
+        if (isFavorite(song.id)) return false
+        val artist = song.artist.trim().lowercase()
+        if (artist.isEmpty()) return false
+        val strikes = dislikes.count { it.artist.trim().lowercase() == artist }
+        if (strikes < 2) return false
+        val liking = favorites.count { it.artist.trim().lowercase() == artist } * 5 + minOf(20, events.count { it.song.artist.trim().lowercase() == artist })
+        return liking < 4 * strikes
     }
 
     fun played(song: Song) {
@@ -174,6 +216,8 @@ object Library {
         }
         val favs = snapshot.optJSONArray("favorites")
         for (i in 0 until (favs?.length() ?: 0)) songs[favs!!.optString(i)]?.let { if (!isFavorite(it.id)) favorites += it }
+        val rejected = snapshot.optJSONArray("dislikes")
+        for (i in 0 until (rejected?.length() ?: 0)) songs[rejected!!.optString(i)]?.let { s -> if (!isDisliked(s.id)) dislikes += s; favorites.removeAll { it.id == s.id } }
         val lists = snapshot.optJSONObject("playlists")
         for (id in lists?.keys() ?: emptyList<String>().iterator()) {
             val p = lists!!.optJSONObject(id) ?: continue

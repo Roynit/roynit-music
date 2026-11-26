@@ -211,6 +211,8 @@ object Sync {
         fun syncable(s: Song) = !s.id.startsWith("sc:")
         val favorites = JSONArray()
         Library.favorites.filter(::syncable).forEach { favorites.put(add(it)) }
+        val dislikes = JSONArray()
+        Library.dislikes.filter(::syncable).forEach { dislikes.put(add(it)) }
         foreign(known?.optJSONArray("favorites")).forEach { favorites.put(it) }
 
         val playlists = JSONObject()
@@ -230,6 +232,6 @@ object Sync {
         }
         Library.events.filter { syncable(it.song) }.forEach { history.put(JSONObject().put("track_id", add(it.song)).put("started_at", it.at)) }
 
-        return JSONObject().put("tracks", tracks).put("playlists", playlists).put("favorites", favorites).put("history", history)
+        return JSONObject().put("tracks", tracks).put("playlists", playlists).put("favorites", favorites).put("dislikes", dislikes).put("history", history)
     }
 }

@@ -10,6 +10,8 @@ pub struct Snapshot {
     pub tracks: BTreeMap<String, Track>,
     pub playlists: BTreeMap<String, Playlist>,
     pub favorites: Vec<String>,
+    #[serde(default)]
+    pub dislikes: Vec<String>,
     pub history: Vec<PlayEvent>,
 }
 
@@ -95,6 +97,7 @@ impl Snapshot {
             .collect();
         let mut snapshot = Self {
             favorites: library.favorites.clone(),
+            dislikes: library.dislikes.clone(),
             playlists: library.playlists.clone(),
             history: history.into_iter().rev().collect(),
             ..Self::default()
@@ -109,6 +112,7 @@ impl Snapshot {
                     .flat_map(|playlist| &playlist.tracks),
             )
             .chain(snapshot.history.iter().map(|event| &event.track_id))
+            .chain(&snapshot.dislikes)
         {
             if let Some(track) = library.tracks.get(id).filter(|track| Self::online(track)) {
                 snapshot
@@ -123,6 +127,7 @@ impl Snapshot {
 
     fn retain_references(&mut self) {
         self.favorites.retain(|id| self.tracks.contains_key(id));
+        self.dislikes.retain(|id| self.tracks.contains_key(id));
         for playlist in self.playlists.values_mut() {
             playlist.tracks.retain(|id| self.tracks.contains_key(id));
         }
@@ -151,6 +156,13 @@ impl Snapshot {
                 .into_iter()
                 .filter(|id| favorites.insert(id.clone())),
         );
+        let mut disliked: HashSet<_> = library.dislikes.iter().cloned().collect();
+        library.dislikes.extend(
+            self.dislikes
+                .into_iter()
+                .filter(|id| disliked.insert(id.clone())),
+        );
+        library.favorites.retain(|id| !disliked.contains(id));
         let mut seen: HashSet<_> = library
             .history
             .iter()

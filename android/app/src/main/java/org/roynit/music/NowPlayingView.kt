@@ -39,6 +39,7 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
     private val title = c.label(22f, Color.WHITE, bold = true)
     private val artist = c.label(16f, 0xCCFFFFFF.toInt())
     private val heart = c.icon(R.drawable.ic_heart_outline, Color.WHITE, 48, 11)
+    private val dislike = c.icon(R.drawable.ic_dislike, Color.WHITE, 48, 11)
     private val seek = Scrubber(c)
     private val elapsed = c.label(12f, 0xB3FFFFFF.toInt())
     private val remaining = c.label(12f, 0xB3FFFFFF.toInt())
@@ -142,6 +143,12 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
                 },
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
             )
+            addView(dislike.apply {
+                setOnClickListener {
+                    val song = Playback.song ?: return@setOnClickListener
+                    c.say(if (Playback.dislike(song)) "Got it. We will not suggest this song again" else "Dislike removed")
+                }
+            })
             addView(heart.apply { setOnClickListener { Playback.song?.let(Library::toggleFavorite) } })
         }
         seek.onScrub = { value, done ->
@@ -517,7 +524,7 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
             when (it.itemId) {
                 1 -> Library.toggleFavorite(song)
                 2 -> Thread {
-                    val songs = listOf(song) + songsOf(JSONObject(Core.radio(song.id, 40))).filter { s -> s.id != song.id }
+                    val songs = listOf(song) + suggestionsOf(JSONObject(Core.radio(song.id, 40))).filter { s -> s.id != song.id }
                     post { if (songs.size > 1) Playback.play(songs, 0) }
                 }.start()
                 3 -> sleepTimer()
@@ -642,6 +649,7 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
         val liked = song != null && Library.isFavorite(song.id)
         heart.setImageResource(if (liked) R.drawable.ic_heart else R.drawable.ic_heart_outline)
         heart.setColorFilter(if (liked) Ui.GREEN else Color.WHITE)
+        dislike.setColorFilter(if (song != null && Library.isDisliked(song.id)) 0xFFFF6B6B.toInt() else Color.WHITE)
         val playing = controller.isPlaying || controller.playbackState == Player.STATE_BUFFERING && controller.playWhenReady
         play.setImageResource(if (playing) R.drawable.ic_pause else R.drawable.ic_play)
         lyricPlay.setImageResource(if (playing) R.drawable.ic_pause else R.drawable.ic_play)

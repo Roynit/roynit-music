@@ -109,6 +109,9 @@ fun MediaItem.withPlayUri(): MediaItem {
         .build()
 }
 
+/** Songs the app picks by itself (a radio, autoplay): the ones the listener turned off are left out. */
+fun suggestionsOf(reply: JSONObject): List<Song> = songsOf(reply).filter { !Library.blocks(it) }
+
 /** The songs in a reply from the Rust core (`{"tracks":[...]}`), without repeats. */
 fun songsOf(reply: JSONObject): List<Song> {
     val tracks = reply.optJSONArray("tracks") ?: return emptyList()
