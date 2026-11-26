@@ -1,5 +1,5 @@
 # Roy Music for Android
 
-- Lyrics light up word by word, with a line under the cover like Spotify.
-- Import playlists from Spotify, YouTube and YouTube Music links.
-- Friend suggestions, cleaner menus, and updates that install from inside the app.
+- New Connect sheet: this phone, Bluetooth devices and the sleep timer.
+- The line being sung shows under the cover; the lyrics preview looks like Spotify's.
+- Lyrics word by word, playlist import and friend suggestions.
