@@ -15,6 +15,7 @@ jni = "0.21"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 riff-core = { path = "..", default-features = false }
 serde_json = "1"
+url = "2"
 
 # Small and fast to load beats clever: the phone loads this library into a process that also plays music.
 [profile.release]

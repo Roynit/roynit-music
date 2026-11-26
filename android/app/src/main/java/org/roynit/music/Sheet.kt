@@ -119,6 +119,7 @@ class SheetMenu(private val context: android.content.Context, private val anchor
         title.startsWith("Share") -> R.drawable.ic_share
         title.startsWith("Sleep") -> R.drawable.ic_moon
         title.startsWith("Blend") -> R.drawable.ic_blend
+        title.startsWith("Import") -> R.drawable.ic_download
         title == "Playlist" -> R.drawable.ic_add
         title.contains("adio") -> R.drawable.ic_shuffle
         title.contains("liked") -> R.drawable.ic_heart_outline

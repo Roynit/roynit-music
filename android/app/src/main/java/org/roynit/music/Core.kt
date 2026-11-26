@@ -22,6 +22,9 @@ object Core {
     @JvmStatic external fun lyrics(title: String, artist: String, seconds: Double, dir: String): String
 
     /** The same lines with a `words` list (time, end, text) on those a provider has word timings for. [lines] is the lines array as JSON. */
+    /** `{"name":..,"tracks":[..]}` for a playlist link (YouTube, YouTube Music, Spotify, Deezer, Apple Music...), or `{"error":..}`. */
+    @JvmStatic external fun importPlaylist(link: String): String
+
     @JvmStatic external fun lyricWords(title: String, artist: String, seconds: Double, lines: String): String
 
     /** `{"mixes":[{name,tracks}],"picks":[...]}` made from a library snapshot (favourites and history). */

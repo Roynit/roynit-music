@@ -817,8 +817,13 @@ class LibraryPage(context: Context, host: SongHost, private val onContext: (Play
         val menu = SheetMenu(c, anchor)
         menu.menu.add(0, 1, 0, "Playlist")
         menu.menu.add(0, 2, 1, "Blend with a friend")
+        menu.menu.add(0, 3, 2, "Import playlist")
         menu.setOnMenuItemClickListener {
-            if (it.itemId == 1) newPlaylist() else Blend.choose(c as android.app.Activity, host)
+            when (it.itemId) {
+                1 -> newPlaylist()
+                2 -> Blend.choose(c as android.app.Activity, host)
+                else -> importPlaylist()
+            }
             true
         }
         menu.show()
@@ -1029,6 +1034,34 @@ class LibraryPage(context: Context, host: SongHost, private val onContext: (Play
     private fun newPlaylist() {
         val input = (c as android.app.Activity).field("Playlist name")
         c.ask("Give your playlist a name", content = input, ok = "Create") { Library.createPlaylist(input.text.toString()) }
+    }
+
+    /** Brings a playlist in from a link: the songs land in a new playlist of your own. */
+    private fun importPlaylist() {
+        val activity = c as android.app.Activity
+        val clip = (c.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).primaryClip
+            ?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString().orEmpty().trim().takeIf { it.startsWith("http") }.orEmpty()
+        val field = activity.field("Playlist link", clip)
+        activity.ask("Import a playlist", "Paste a link from Spotify, YouTube, YouTube Music, Deezer or Apple Music.", content = field, ok = "Import") {
+            val link = field.text.toString().trim()
+            if (link.isEmpty()) return@ask
+            c.say("Importing... this can take a moment")
+            Thread {
+                val reply = runCatching { JSONObject(Core.importPlaylist(link)) }.getOrDefault(JSONObject().put("error", "Could not import that link"))
+                val songs = songsOf(reply)
+                post {
+                    when {
+                        reply.has("error") -> c.say(reply.optString("error"))
+                        songs.isEmpty() -> c.say("No songs could be found in that playlist")
+                        else -> {
+                            val list = Library.createPlaylist(reply.optString("name").ifBlank { "Imported playlist" })
+                            songs.forEach { Library.addTo(list, it) }
+                            c.say("Imported ${songs.size} songs into \"${list.name}\"")
+                        }
+                    }
+                }
+            }.start()
+        }
     }
 
     /** A square cover: a mosaic of four, one picture, or Spotify's purple heart for Liked Songs. */

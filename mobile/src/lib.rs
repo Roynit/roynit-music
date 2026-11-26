@@ -122,7 +122,6 @@ fn resolve_any(id: &str, title: &str, artist: &str, seconds: f64) -> Result<Valu
     resolve(id)
 }
 
-/// Lyrics for a song, from the first provider that has them: `{"lines":[{time,text,..}],"text"?,"instrumental"?}`.
 /// Word-by-word timings from a provider, merged into the lines the app already has (the same merge the PC app does).
 fn lyric_words(title: &str, artist: &str, seconds: f64, lines: &str) -> Result<Value> {
     let mut ours: Vec<riff_core::lyrics::Line> = serde_json::from_str(lines)?;
@@ -141,9 +140,72 @@ fn lyric_words(title: &str, artist: &str, seconds: f64, lines: &str) -> Result<V
     Ok(json!({"lines": ours}))
 }
 
+/// Lyrics for a song, from the first provider that has them: `{"lines":[{time,text,..}],"text"?,"instrumental"?}`.
 /// `dir` is where found lyrics are kept so the next play needs no network.
 fn lyrics(title: &str, artist: &str, seconds: f64, dir: &str) -> Result<Value> {
     riff_core::lyrics::fetch(client()?, std::path::Path::new(dir), title, artist, seconds, true)
+}
+
+fn find_header(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Object(map) => ["musicResponsiveHeaderRenderer", "musicDetailHeaderRenderer", "musicEditablePlaylistDetailHeaderRenderer"]
+            .iter()
+            .find_map(|key| map.get(*key))
+            .or_else(|| map.values().find_map(find_header)),
+        Value::Array(items) => items.iter().find_map(find_header),
+        _ => None,
+    }
+}
+
+/// A playlist from a link: `{"name":..,"tracks":[..]}`. YouTube and YouTube Music playlists are read directly, Spotify
+/// songs are kept as Spotify songs (found on YouTube Music when played), and other catalogs are matched to YouTube
+/// Music now, a few at a time.
+fn import_playlist(link: &str) -> Result<Value> {
+    let url = url::Url::parse(link.trim()).context("That is not a link")?;
+    let host = url.host_str().unwrap_or("").to_lowercase();
+    let client = client()?;
+    if host.contains("youtube.com") || host == "youtu.be" {
+        let list = url.query_pairs().find(|(k, _)| k == "list").map(|(_, v)| v.into_owned()).context("This YouTube link has no playlist in it")?;
+        let music = Music { client, cookies: None };
+        let id = format!("VL{list}");
+        let page = music.browse(&id, None)?;
+        let name = music
+            .browse_raw(&id)
+            .ok()
+            .and_then(|raw| find_header(&raw).and_then(|h| h["title"]["runs"][0]["text"].as_str().map(str::to_owned)))
+            .unwrap_or_else(|| "Imported playlist".into());
+        return Ok(json!({"name": name, "tracks": page["tracks"]}));
+    }
+    anyhow::ensure!(!host.contains("soundcloud.com"), "SoundCloud playlists are not supported on the phone yet");
+    let metadata = riff_core::catalog::metadata_with_proxy(client, link.trim(), None, None)?;
+    let plan = riff_core::catalog::import_plan(&metadata, link.trim(), true)?;
+    let name = plan["name"].as_str().unwrap_or("Imported playlist").to_owned();
+    let tracks = plan["tracks"].as_array().cloned().unwrap_or_default();
+    if plan["provider"] == "spotify" {
+        return Ok(json!({"name": name, "tracks": tracks}));
+    }
+    // Other catalogs name songs only: find each on YouTube Music, a handful in parallel (the first 150).
+    let wanted: Vec<Value> = tracks.into_iter().take(150).collect();
+    let found = std::sync::Mutex::new(Vec::<(usize, Value)>::new());
+    std::thread::scope(|scope| {
+        for lane in 0..5 {
+            let (wanted, found) = (&wanted, &found);
+            scope.spawn(move || {
+                let music = Music { client, cookies: None };
+                for (index, t) in wanted.iter().enumerate().filter(|(i, _)| i % 5 == lane) {
+                    let (title, artist) = (t["title"].as_str().unwrap_or(""), t["artist"].as_str().unwrap_or(""));
+                    if let Ok(video) = riff_core::sources::match_video(&music, title, artist, t["duration"].as_f64().unwrap_or(0.)) {
+                        let song = json!({"id": video, "title": title, "artist": artist, "album": t["album"], "duration": t["duration"], "cover": t["cover"],
+                            "platform": "ytmusic", "source": format!("https://music.youtube.com/watch?v={video}")});
+                        found.lock().unwrap().push((index, song));
+                    }
+                }
+            });
+        }
+    });
+    let mut found = found.into_inner().unwrap();
+    found.sort_by_key(|(i, _)| *i);
+    Ok(json!({"name": name, "tracks": found.into_iter().map(|(_, s)| s).collect::<Vec<_>>(), "asked": wanted.len()}))
 }
 
 fn answer(work: impl FnOnce() -> Result<Value>) -> String {
@@ -196,6 +258,12 @@ pub extern "system" fn Java_org_roynit_music_Core_lyricWords(
 ) -> jstring {
     let (title, artist, lines) = (text(&mut env, title), text(&mut env, artist), text(&mut env, lines));
     reply(&mut env, answer(|| lyric_words(&title, &artist, seconds, &lines)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_roynit_music_Core_importPlaylist(mut env: JNIEnv, _: JClass, link: JString) -> jstring {
+    let link = text(&mut env, link);
+    reply(&mut env, answer(|| import_playlist(&link)))
 }
 
 #[unsafe(no_mangle)]
