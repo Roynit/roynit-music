@@ -1171,9 +1171,28 @@ impl App {
             if has_text {
                 let button = egui::Button::new(RichText::new("Send").bold().color(on_accent)).fill(accent).corner_radius(18);
                 send |= ui.add(button).clicked();
-            } else if ui.add(egui::Button::new(RichText::new("👍").size(22.)).frame(false).min_size(egui::vec2(44., 36.))).on_hover_text("Send a thumbs up").clicked() {
-                self.social.chats.entry(id.clone()).or_default().draft = "👍".to_owned();
-                send = true;
+            } else {
+                const PICKS: [&str; 10] = ["👍", "😆", "😮", "😢", "😡", "🔥", "🙏", "🎵", "💪", "👏"];
+                let quick = friend.quick.clone().unwrap_or_else(|| "👍".to_owned());
+                let shown = quick.replace('\u{fe0f}', "");
+                let button = ui
+                    .add(egui::Button::new(RichText::new(shown).size(22.)).frame(false).min_size(egui::vec2(44., 36.)))
+                    .on_hover_text("Send your quick icon (right-click to change it for both of you)");
+                if button.clicked() {
+                    self.social.chats.entry(id.clone()).or_default().draft = quick;
+                    send = true;
+                }
+                button.context_menu(|ui| {
+                    ui.label(RichText::new("Quick icon for both of you").small().color(MUTED));
+                    ui.horizontal(|ui| {
+                        for e in PICKS {
+                            if ui.add(egui::Button::new(RichText::new(e).size(22.)).frame(false).min_size(egui::vec2(34., 34.))).clicked() {
+                                self.social.set_quick(&id, e);
+                                ui.close();
+                            }
+                        }
+                    });
+                });
             }
         });
         if send {

@@ -1,4 +1,6 @@
 # Roy Music for Android
 
-- Chat like Messenger: hold a message to react, reply, copy or share; emoji panel and a quick 👍 next to the box. The keyboard no longer pushes the player and navigation bar.
-- Covers and avatars load at once: kept in memory and on disk, and fetched ahead while you scroll.
+- Message notifications at once, even when the app is closed, with Reply and a quick icon button right on the notification.
+- Round floating chat bubbles like Messenger's (switch on or off in your profile).
+- Quick icon for each friend, shared by both of you and on every device: hold the button beside the message box to change it.
+- Tapping a message notification opens Friends.

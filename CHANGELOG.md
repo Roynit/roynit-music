@@ -1,3 +1,8 @@
+# Roy Music 0.3.3
+
+- Quick icon for each friend, shared by both of you on every device: right-click the button beside the message box to change it.
+- Chat reactions, replies and emoji panel now sync with the phone's quick icon and notifications.
+
 # Roy Music 0.3.2
 
 - Chat like Messenger: react to a message (right-click), reply with a quote, copy, and pick emoji from a panel.

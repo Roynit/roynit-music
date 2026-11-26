@@ -45,6 +45,8 @@ pub struct Friend {
     pub online: bool,
     pub listening: Option<Listening>,
     pub last_seen: Option<i64>,
+    /// The quick icon the two of you share (None = the thumbs up).
+    pub quick: Option<String>,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -377,6 +379,14 @@ impl Social {
         self.call(Tag::React, reqwest::Method::POST, format!("/messages/{id}/{message}/react"), Some(json!({"emoji": emoji})));
     }
 
+    /// Sets the quick icon for you and this friend: shown at once, saved on the server for both of you.
+    pub fn set_quick(&mut self, id: &str, emoji: &str) {
+        if let Some(friend) = self.friends.iter_mut().find(|f| f.person.id == id) {
+            friend.quick = Some(emoji.to_owned());
+        }
+        self.call(Tag::React, reqwest::Method::PUT, format!("/messages/{id}/quick"), Some(json!({"emoji": emoji})));
+    }
+
     pub fn open_chat(&mut self, id: &str) {
         let chat = self.chats.entry(id.to_owned()).or_default();
         chat.stick = true;
@@ -475,6 +485,12 @@ impl Social {
                 self.suggestions = serde_json::from_value(data["suggestions"].clone()).unwrap_or_default();
             }
             (Tag::Chat(id), Ok(data)) => {
+                // The quick icon is shared with this friend: whatever either of you picked, on any device.
+                if data.get("quick").is_some()
+                    && let Some(friend) = self.friends.iter_mut().find(|f| f.person.id == id)
+                {
+                    friend.quick = data["quick"].as_str().map(str::to_owned);
+                }
                 let fresh: Vec<Message> =
                     serde_json::from_value(data["messages"].clone()).unwrap_or_default();
                 let chat = self.chats.entry(id.clone()).or_default();

@@ -728,12 +728,39 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
             isChecked = me.optBoolean("share_taste", true)
             setOnCheckedChangeListener { _, on -> Thread { Account.accept(Account.call("PATCH", "/me", JSONObject().put("share_taste", on))) }.start() }
         }
+        val bubbles = android.widget.Switch(c).apply {
+            isChecked = Notifier.bubbles(c)
+            setOnCheckedChangeListener { _, on -> Notifier.setBubbles(c, on) }
+        }
+        val live = android.widget.Switch(c).apply {
+            isChecked = Notifier.live(c)
+            setOnCheckedChangeListener { _, on ->
+                Notifier.setLive(c, on)
+                if (on) LiveService.askBatteryExemption(c)
+            }
+        }
         card(
             LinearLayout(c).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(0, c.dp(6), 0, c.dp(6))
                 addView(c.label(15f, Color.WHITE).apply { text = "Let friends Blend with my music" }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                 addView(share)
+            },
+            LinearLayout(c).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, c.dp(6), 0, c.dp(6))
+                addView(c.label(15f, Color.WHITE).apply { text = "Floating chat bubbles" }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                addView(bubbles)
+            },
+            LinearLayout(c).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, c.dp(6), 0, c.dp(6))
+                addView(LinearLayout(c).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(c.label(15f, Color.WHITE).apply { text = "Instant message notifications" })
+                    addView(c.label(12f, Ui.MUTED).apply { text = "Keeps a quiet notification in the status bar" })
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                addView(live)
             },
             action(if (me.optBoolean("has_password")) "Change password" else "Set a password") { changePassword(me.optBoolean("has_password")) },
             c.label(12f, Ui.MUTED).apply { text = "Your library follows your account on every device. " + Sync.status; setPadding(0, c.dp(4), 0, 0) },

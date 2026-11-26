@@ -552,7 +552,7 @@ async function requireFriend(env, me, other) {
 async function socialSnapshot(env, user) {
   const stamp = now();
   const {results} = await env.DB.prepare(
-    "SELECT f.status,f.requester,u.id,u.username,u.display_name,u.bio,u.equipped,u.avatar_set,u.avatar_version,u.banner_set,u.banner_version,p.seen_at,p.invisible,p.listening "
+    "SELECT f.status,f.requester,f.quick_icon,u.id,u.username,u.display_name,u.bio,u.equipped,u.avatar_set,u.avatar_version,u.banner_set,u.banner_version,p.seen_at,p.invisible,p.listening "
     + "FROM friendships f JOIN users u ON u.id=CASE WHEN f.low=?1 THEN f.high ELSE f.low END "
     + "LEFT JOIN presence p ON p.user_id=u.id WHERE f.low=?1 OR f.high=?1 ORDER BY f.created_at DESC"
   ).bind(user.id).all();
@@ -571,7 +571,7 @@ async function socialSnapshot(env, user) {
       const online = !row.invisible && row.seen_at > stamp - ONLINE_FOR;
       let listening = null;
       if (online && row.listening) { try { listening = JSON.parse(row.listening); } catch {} }
-      out.friends.push({...person(row), online, listening, last_seen:row.invisible ? null : row.seen_at || null});
+      out.friends.push({...person(row), quick:row.quick_icon || null, online, listening, last_seen:row.invisible ? null : row.seen_at || null});
     } else if (row.requester === user.id) out.outgoing.push(person(row));
     else out.incoming.push(person(row));
   }
@@ -709,6 +709,17 @@ async function socialRoute(request, env, user, path, url) {
     const ranked = [...score.entries()].sort((x, y) => y[1] - x[1]).map(([id]) => snapshot.tracks[id]).filter(Boolean).slice(0, 60);
     return reply({name: row.display_name, tracks: ranked});
   }
+  // Long poll for the phone's background service: answers the moment a friend's message newer than `after` exists, or after ~16 s.
+  if (path === "/inbox/wait" && request.method === "GET") {
+    const after = Number(new URL(request.url).searchParams.get("after"));
+    const newest = async () => (await env.DB.prepare("SELECT COALESCE(MAX(id),0) AS id FROM messages WHERE (low=?1 OR high=?1) AND sender!=?1").bind(user.id).first()).id;
+    let id = await newest();
+    for (let waited = 0; after >= 0 && id <= after && waited < 16_000; waited += 2_000) {
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      id = await newest();
+    }
+    return reply({id});
+  }
   const chat = path.match(/^\/messages\/([0-9a-f-]{36})$/);
   if (chat) {
     await requireFriend(env, user.id, chat[1]);
@@ -729,7 +740,9 @@ async function socialRoute(request, env, user, path, url) {
       ).bind(low, high).all();
       const reactions = Object.create(null);
       for (const x of found.results) (reactions[x.message_id] ||= []).push({emoji:x.emoji, mine:x.user_id === user.id});
+      const pair = await friendship(env, user.id, chat[1]);
       return reply({
+        quick:pair?.quick_icon || null,
         messages:results.reverse().map((m) => ({id:m.id, mine:m.sender === user.id, body:m.body, at:m.created_at,
           reply:m.reply_to ? {id:m.reply_to, mine:m.reply_sender === user.id, body:(m.reply_body || "").slice(0, 120)} : null})),
         reactions,
@@ -749,6 +762,17 @@ async function socialRoute(request, env, user, path, url) {
       const row = await env.DB.prepare("INSERT INTO messages(low,high,sender,body,created_at,reply_to) VALUES (?,?,?,?,?,?) RETURNING id,created_at").bind(low, high, user.id, body, now(), replyTo).first();
       return reply({id:row.id, mine:true, body, at:row.created_at, reply:null});
     }
+  }
+  const quick = path.match(/^\/messages\/([0-9a-f-]{36})\/quick$/);
+  if (quick && request.method === "PUT") {
+    await rate(env, request, "quick", 60, user.id);
+    await requireFriend(env, user.id, quick[1]);
+    const [low, high] = pairOf(user.id, quick[1]);
+    const text = str((await json(request, 1024)).emoji).trim();
+    // One emoji, like a reaction; an empty value goes back to the default thumbs up.
+    if (text && ([...text].length > 8 || !/\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(text))) throw new HttpError(400, "Pick an emoji.");
+    await env.DB.prepare("UPDATE friendships SET quick_icon=? WHERE low=? AND high=?").bind(text || null, low, high).run();
+    return reply({quick:text || null});
   }
   const react = path.match(/^\/messages\/([0-9a-f-]{36})\/(\d{1,12})\/react$/);
   if (react && request.method === "POST") {

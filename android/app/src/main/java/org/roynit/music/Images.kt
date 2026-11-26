@@ -118,6 +118,12 @@ object Images {
         }
     }
 
+    /** A picture right now, on the calling (worker) thread: from memory or disk, else downloaded. For notifications. */
+    fun blocking(url: String, px: Int): Bitmap? {
+        val key = sized(url, px)
+        return cache.get(memoryKey(key, px)) ?: fetch(key, px)
+    }
+
     private fun show(view: ImageView, bitmap: Bitmap) {
         val radius = view.getTag(R.id.round_radius) as? Int
         if (radius != null && radius > 0) view.setImageDrawable(RoundDrawable(bitmap, radius.toFloat())) else view.setImageBitmap(bitmap)

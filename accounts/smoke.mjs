@@ -495,3 +495,37 @@ test("chat: replies quote the message they answer, and each person can react onc
   // A stranger can neither read nor react.
   await request("/messages/" + a.account.id + "/" + sent.id + "/react", "POST", { emoji: heart }, c.token, 403);
 });
+
+test("inbox wait: answers at once for a new message and times out quietly when there is none", async () => {
+  const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
+  const password = "local-" + crypto.randomUUID();
+  const make = (tag) => request("/register", "POST", { email: tag + nonce + "@example.test", username: tag + "_" + nonce, password });
+  const [a, b] = [await make("wa"), await make("wb")];
+  await request("/friends/request", "POST", { username: b.account.username }, a.token);
+  await request("/friends/accept", "POST", { id: a.account.id }, b.token);
+  const start = await request("/inbox/wait?after=-1", "GET", undefined, b.token);
+  assert.equal(start.id, 0);
+  const waiting = request("/inbox/wait?after=" + start.id, "GET", undefined, b.token);
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  const sent = await request("/messages/" + b.account.id, "POST", { body: "hi" }, a.token);
+  const woke = await waiting;
+  assert.equal(woke.id, sent.id);
+  assert.equal((await request("/inbox/wait?after=-1", "GET", undefined, a.token)).id, 0, "your own messages never wake you");
+});
+
+test("quick icon: shared by both friends, shown in the friend list and the chat, validated", async () => {
+  const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
+  const password = "local-" + crypto.randomUUID();
+  const make = (tag) => request("/register", "POST", { email: tag + nonce + "@example.test", username: tag + "_" + nonce, password });
+  const [a, b, c] = [await make("qa"), await make("qb"), await make("qc")];
+  await request("/friends/request", "POST", { username: b.account.username }, a.token);
+  await request("/friends/accept", "POST", { id: a.account.id }, b.token);
+  assert.equal((await request("/messages/" + b.account.id, "GET", undefined, a.token)).quick, null);
+  assert.equal((await request("/messages/" + b.account.id + "/quick", "PUT", { emoji: "🥰" }, a.token)).quick, "🥰");
+  assert.equal((await request("/messages/" + a.account.id, "GET", undefined, b.token)).quick, "🥰", "the other side sees it");
+  assert.equal((await request("/social", "GET", undefined, b.token)).friends[0].quick, "🥰");
+  await request("/messages/" + b.account.id + "/quick", "PUT", { emoji: "not an emoji" }, a.token, 400);
+  await request("/messages/" + a.account.id + "/quick", "PUT", { emoji: "🔥" }, c.token, 403);
+  await request("/messages/" + b.account.id + "/quick", "PUT", { emoji: "" }, a.token);
+  assert.equal((await request("/messages/" + a.account.id, "GET", undefined, b.token)).quick, null, "empty goes back to the default");
+});

@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
@@ -28,6 +30,17 @@
             </intent-filter>
         </activity>
 
+        <!-- A friend's chat inside a floating bubble (Android 11+). -->
+        <activity
+            android:name=".BubbleChatActivity"
+            android:allowEmbedded="true"
+            android:documentLaunchMode="always"
+            android:exported="false"
+            android:resizeableActivity="true"
+            android:windowSoftInputMode="adjustResize" />
+
+        <receiver android:name=".NoteActions" android:exported="false" />
+
         <!-- The music lives here, not in the screen: closing the app does not stop it. -->
         <service
             android:name=".PlaybackService"
@@ -37,6 +50,23 @@
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>
         </service>
+
+        <!-- Keeps one quiet connection open so a friend's message arrives at once, like Messenger's. -->
+        <service
+            android:name=".LiveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Waits for new chat messages and shows a notification when one arrives" />
+        </service>
+
+        <receiver android:name=".BootReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Android wakes this every so often to look for new messages while the app is closed. -->
         <service

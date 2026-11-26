@@ -12,6 +12,15 @@ import android.app.job.JobService
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.app.Person
+import android.app.RemoteInput
+import android.content.BroadcastReceiver
+import android.content.LocusId
+import android.content.pm.ShortcutInfo
+import android.content.pm.ShortcutManager
+import android.graphics.drawable.Icon
+import android.os.Build
+import org.json.JSONObject
 import android.media.AudioAttributes
 import android.net.Uri
 import android.os.Handler
@@ -25,7 +34,7 @@ import java.util.Locale
  * wakes [PushJob] about every quarter of an hour. Instant push would need a Google Firebase project, which this does not use.
  */
 object Notifier {
-    private const val MESSAGES = "messages_v1"
+    private const val MESSAGES = "messages_v2"
     private const val GREETINGS = "greetings_v1"
 
     /** True while the app is on screen, and the friend whose chat is open: no ping for a message you are reading. */
@@ -40,9 +49,11 @@ object Notifier {
         val manager = context.getSystemService(NotificationManager::class.java)
         val sound = Uri.parse("android.resource://${context.packageName}/${R.raw.roy_ting}")
         val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()
+        manager.deleteNotificationChannel("messages_v1")
         fun make(id: String, name: String, importance: Int) {
             if (manager.getNotificationChannel(id) != null) return
             manager.createNotificationChannel(NotificationChannel(id, name, importance).apply {
+                if (id == MESSAGES && Build.VERSION.SDK_INT >= 29) setAllowBubbles(true)
                 setSound(sound, attributes)
                 enableVibration(true)
                 vibrationPattern = longArrayOf(0, 40, 60, 40)
@@ -64,6 +75,84 @@ object Notifier {
         runCatching { context.getSystemService(NotificationManager::class.java).notify(id, note) }
     }
 
+    /** The quick icon you set for one friend (like Messenger's): the thumbs-up beside the message box and the button on their notification. */
+    fun quickIcon(context: Context, friend: String) = context.getSharedPreferences("roy_notify", Context.MODE_PRIVATE).getString("quick_$friend", null) ?: "👍"
+
+    /** Sets it for both of you: shown at once from the local copy, and saved on the server so the friend and your other devices get it. */
+    fun setQuickIcon(context: Context, friend: String, icon: String) {
+        syncQuick(context, friend, icon)
+        Thread { Account.call("PUT", "/messages/$friend/quick", JSONObject().put("emoji", icon)) }.start()
+    }
+
+    /** Takes what the server says (null = the default) into the local copy that the button and the notification read. */
+    fun syncQuick(context: Context, friend: String, icon: String?) {
+        val prefs = context.getSharedPreferences("roy_notify", Context.MODE_PRIVATE)
+        if (prefs.getString("quick_$friend", null) == icon) return
+        prefs.edit().apply { if (icon == null) remove("quick_$friend") else putString("quick_$friend", icon) }.apply()
+    }
+
+    /** Instant message notifications through a small always-on background service (on by default). */
+    fun live(context: Context) = context.getSharedPreferences("roy_notify", Context.MODE_PRIVATE).getBoolean("live", true)
+
+    fun setLive(context: Context, on: Boolean) {
+        context.getSharedPreferences("roy_notify", Context.MODE_PRIVATE).edit().putBoolean("live", on).apply()
+        if (on) LiveService.start(context) else context.stopService(Intent(context, LiveService::class.java))
+    }
+
+    /** Turn the floating chat bubbles on or off (on by default; Android's own settings can still switch them off). */
+    fun bubbles(context: Context) = context.getSharedPreferences("roy_notify", Context.MODE_PRIVATE).getBoolean("bubbles", true)
+
+    fun setBubbles(context: Context, on: Boolean) {
+        context.getSharedPreferences("roy_notify", Context.MODE_PRIVATE).edit().putBoolean("bubbles", on).apply()
+    }
+
+    /** A friend's message: Reply and Like right on the notification, and (when allowed) a round floating bubble like Messenger's. */
+    private fun postMessage(context: Context, friend: JSONObject, text: String) {
+        channels(context)
+        val id = friend.optString("id")
+        val name = friend.optString("display_name").ifBlank { "New message" }
+        val code = id.hashCode()
+        val picture = Account.avatarUrl(id, friend.optInt("avatar_version"))?.let { Images.blocking(it, 192) }
+        val icon = if (picture != null) Icon.createWithAdaptiveBitmap(picture) else Icon.createWithResource(context, R.mipmap.ic_launcher)
+        val person = Person.Builder().setName(name).setKey(id).setIcon(icon).build()
+        val me = Person.Builder().setName(if (vi()) "Bạn" else "You").build()
+        val open = PendingIntent.getActivity(
+            context, code,
+            Intent(context, MainActivity::class.java).putExtra("tab", 3).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        fun receiver(action: String, mutable: Boolean) = PendingIntent.getBroadcast(
+            context, code * 4 + action.length,
+            Intent(context, NoteActions::class.java).setAction(action).putExtra("id", id).putExtra("name", name),
+            PendingIntent.FLAG_UPDATE_CURRENT or (if (mutable) (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0) else PendingIntent.FLAG_IMMUTABLE),
+        )
+        val reply = Notification.Action.Builder(Icon.createWithResource(context, R.drawable.ic_reply), if (vi()) "Trả lời" else "Reply", receiver("reply", true))
+            .addRemoteInput(RemoteInput.Builder("text").setLabel(if (vi()) "Trả lời $name" else "Reply to $name").build())
+            .setSemanticAction(Notification.Action.SEMANTIC_ACTION_REPLY).setAllowGeneratedReplies(true).build()
+        val like = Notification.Action.Builder(Icon.createWithResource(context, R.drawable.ic_heart), quickIcon(context, id), receiver("like", false)).build()
+        val builder = Notification.Builder(context, MESSAGES).setSmallIcon(R.drawable.ic_send).setColor(Ui.GREEN).setContentIntent(open).setAutoCancel(true)
+            .setStyle(Notification.MessagingStyle(me).addMessage(text, System.currentTimeMillis(), person))
+            .setCategory(Notification.CATEGORY_MESSAGE).addAction(reply).addAction(like).setShortcutId("chat_$id")
+        if (Build.VERSION.SDK_INT >= 29) builder.setLocusId(LocusId("chat_$id"))
+        if (Build.VERSION.SDK_INT >= 30 && bubbles(context)) runCatching {
+            val shortcuts = context.getSystemService(ShortcutManager::class.java)
+            shortcuts.pushDynamicShortcut(
+                ShortcutInfo.Builder(context, "chat_$id").setLongLived(true).setShortLabel(name).setIcon(icon).setPerson(person)
+                    .setLocusId(LocusId("chat_$id")).setIntent(Intent(context, MainActivity::class.java).setAction(Intent.ACTION_VIEW)).build(),
+            )
+            val bubble = PendingIntent.getActivity(
+                context, code,
+                Intent(context, BubbleChatActivity::class.java).setAction("bubble_$id").putExtra("person", friend.toString()),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+            )
+            builder.setBubbleMetadata(Notification.BubbleMetadata.Builder(bubble, icon).setDesiredHeight(640).setSuppressNotification(false).build())
+        }
+        runCatching { context.getSystemService(NotificationManager::class.java).notify(code, builder.build()) }
+    }
+
+    /** A plain one-line notice that replaces a friend's notification (used when a reply from the notification could not be sent). */
+    fun notice(context: Context, id: Int, title: String, text: String) = post(context, MESSAGES, id, title, text, R.drawable.ic_send, 3)
+
     /** Looks at friends' messages, the time of day and the birthday. Call from a worker thread. */
     fun check(context: Context) {
         Account.load(context)
@@ -74,15 +163,20 @@ object Notifier {
         val unread = social.optJSONObject("unread")
         if (unread != null) {
             val latest = social.optJSONObject("latest")
-            val names = HashMap<String, String>()
-            social.optJSONArray("friends")?.let { list -> for (i in 0 until list.length()) list.getJSONObject(i).let { names[it.optString("id")] = it.optString("display_name") } }
+            val friends = HashMap<String, JSONObject>()
+            social.optJSONArray("friends")?.let { list ->
+                for (i in 0 until list.length()) list.getJSONObject(i).let {
+                    friends[it.optString("id")] = it
+                    syncQuick(context, it.optString("id"), if (it.isNull("quick")) null else it.optString("quick"))
+                }
+            }
             val senders = unread.keys().asSequence().toSet()
             val edit = prefs.edit()
             for (sender in senders) {
                 val count = unread.optInt(sender)
                 if (count > prefs.getInt("unread_$sender", 0) && !(foreground && chatOpenWith == sender)) {
                     val text = latest?.optString(sender).orEmpty().ifBlank { "Sent you a message" }
-                    post(context, MESSAGES, sender.hashCode(), names[sender] ?: "New message", if (count > 1) "$text  (+${count - 1})" else text, R.drawable.ic_send, 2)
+                    postMessage(context, friends[sender] ?: JSONObject().put("id", sender), if (count > 1) "$text  (+${count - 1})" else text)
                 }
                 edit.putInt("unread_$sender", count)
             }
@@ -146,6 +240,7 @@ object Notifier {
     fun start(context: Context) {
         val app = context.applicationContext
         channels(app)
+        if (live(app)) LiveService.start(app)
         if (!looping) {
             looping = true
             val run = object : Runnable {
@@ -173,4 +268,29 @@ class PushJob : JobService() {
     }
 
     override fun onStopJob(params: JobParameters) = false
+}
+
+/** Handles Reply (typed on the notification) and Like (sends 👍) without opening the app. */
+class NoteActions : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val id = intent.getStringExtra("id") ?: return
+        val name = intent.getStringExtra("name").orEmpty()
+        val text = if (intent.action == "like") Notifier.quickIcon(context, id) else RemoteInput.getResultsFromIntent(intent)?.getCharSequence("text")?.toString()?.trim().orEmpty()
+        val pending = goAsync()
+        val app = context.applicationContext
+        Thread {
+            var failed = ""
+            try {
+                Account.load(app)
+                if (text.isNotEmpty()) failed = Account.call("POST", "/messages/$id", JSONObject().put("body", text)).optString("error")
+                if (failed.isEmpty()) Account.call("GET", "/messages/$id?after=999999999999&read=1")
+            } catch (e: Exception) {
+                failed = e.message ?: "error"
+            } finally {
+                if (failed.isEmpty()) app.getSystemService(NotificationManager::class.java).cancel(id.hashCode())
+                else Notifier.notice(app, id.hashCode(), name, "Message not sent. Open the app to try again.")
+                pending.finish()
+            }
+        }.start()
+    }
 }

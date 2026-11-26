@@ -38,6 +38,7 @@ class ChatView(private val c: Context, private val onProfile: (JSONObject) -> Un
     private var replyingTo: JSONObject? = null
     private var selected: JSONObject? = null
     private var pickingReaction: JSONObject? = null
+    private var choosingQuick = false
     private val handler = Handler(Looper.getMainLooper())
     private val clock = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
     private val dayFormat = java.text.SimpleDateFormat("d MMMM yyyy", java.util.Locale.getDefault())
@@ -114,7 +115,9 @@ class ChatView(private val c: Context, private val onProfile: (JSONObject) -> Un
         })
         field.setOnTouchListener { _, event -> if (event.action == MotionEvent.ACTION_DOWN && panel.visibility == VISIBLE) panel.visibility = GONE; false }
         sendIcon.setOnClickListener { send(field.text.toString().trim()) }
-        thumb.setOnClickListener { send("👍") }
+        thumb.setOnClickListener { person?.let { send(Notifier.quickIcon(c, it.optString("id"))) } }
+        // Hold the quick icon to choose another one for this friend; it is also what the notification's quick button sends.
+        thumb.setOnLongClickListener { choosingQuick = true; pickingReaction = null; thumb.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); openPanel(); true }
         // When the keyboard opens or closes, keep the latest message in view.
         stage.addOnLayoutChangeListener { _, _, top, _, bottomEdge, _, oldTop, _, oldBottom -> if (bottomEdge - top < oldBottom - oldTop) scroll.post { scroll.fullScroll(View.FOCUS_DOWN) } }
     }
@@ -134,6 +137,8 @@ class ChatView(private val c: Context, private val onProfile: (JSONObject) -> Un
         panel.visibility = GONE
         visibility = VISIBLE
         Notifier.chatOpenWith = who.optString("id")
+        thumb.text = Notifier.quickIcon(c, who.optString("id"))
+        choosingQuick = false
         drawHeader()
         draw(true)
         load(true)
@@ -154,7 +159,7 @@ class ChatView(private val c: Context, private val onProfile: (JSONObject) -> Un
     fun back() {
         when {
             holdLayer.visibility == VISIBLE -> dismissSelection()
-            panel.visibility == VISIBLE -> panel.visibility = GONE
+            panel.visibility == VISIBLE -> { panel.visibility = GONE; choosingQuick = false }
             else -> close()
         }
     }
@@ -200,6 +205,11 @@ class ChatView(private val c: Context, private val onProfile: (JSONObject) -> Un
             val marks = reply.optJSONObject("reactions")
             post {
                 if (!isOpen || person?.optString("id") != who.optString("id") || found == null) return@post
+                if (reply.has("quick")) {
+                    // The quick icon is shared with this friend: what either of you picked, on any device.
+                    Notifier.syncQuick(c, who.optString("id"), if (reply.isNull("quick")) null else reply.optString("quick"))
+                    thumb.text = Notifier.quickIcon(c, who.optString("id"))
+                }
                 var news = false
                 for (i in 0 until found.length()) {
                     val m = found.getJSONObject(i)
@@ -382,7 +392,7 @@ class ChatView(private val c: Context, private val onProfile: (JSONObject) -> Un
                     setOnClickListener { react(m, if (e == mineNow) null else e); dismissSelection() }
                 }, LinearLayout.LayoutParams(c.dp(44), c.dp(44)))
             }
-            addView(c.icon(R.drawable.ic_add_circle, Ui.MUTED, 40, 6).apply { setOnClickListener { pickingReaction = m; holdLayer.visibility = GONE; showActions(false); openPanel() } }, LinearLayout.LayoutParams(c.dp(40), c.dp(44)))
+            addView(c.icon(R.drawable.ic_add_circle, Ui.MUTED, 40, 6).apply { setOnClickListener { pickingReaction = m; choosingQuick = false; holdLayer.visibility = GONE; showActions(false); openPanel() } }, LinearLayout.LayoutParams(c.dp(40), c.dp(44)))
         }
         val barHeight = c.dp(56)
         val aboveTop = top - barHeight - c.dp(6)
@@ -500,6 +510,13 @@ class ChatView(private val c: Context, private val onProfile: (JSONObject) -> Un
     }
 
     private fun pick(emoji: String) {
+        if (choosingQuick) {
+            choosingQuick = false
+            person?.let { Notifier.setQuickIcon(c, it.optString("id"), emoji) }
+            thumb.text = emoji
+            panel.visibility = GONE
+            return
+        }
         val target = pickingReaction
         if (target != null) {
             val mineNow = reactions[target.optLong("id")].orEmpty().firstOrNull { it.second }?.first
@@ -526,6 +543,7 @@ class ChatView(private val c: Context, private val onProfile: (JSONObject) -> Un
             (c.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(field, 0)
         } else {
             pickingReaction = null
+            choosingQuick = false
             openPanel()
         }
     }
