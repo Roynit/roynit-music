@@ -1,4 +1,4 @@
 # Roy Music for Android
 
-- Orbs shop and daily listening quests: earn Orbs by listening, spend them on avatar decorations, nameplates, frames and effects.
-- Friends' decorations show on their avatar, list and profile, with animation.
+- Chat like Messenger: hold a message to react, reply, copy or share; emoji panel and a quick 👍 next to the box. The keyboard no longer pushes the player and navigation bar.
+- Covers and avatars load at once: kept in memory and on disk, and fetched ahead while you scroll.

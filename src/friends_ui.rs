@@ -963,6 +963,7 @@ impl App {
     }
 
     fn chat_view(&mut self, ui: &mut egui::Ui, friend: &Friend) {
+        const QUICK: [&str; 6] = ["❤", "😆", "😮", "😢", "😡", "👍"];
         let id = friend.person.id.clone();
         ui.horizontal(|ui| {
             if Self::icon_button(ui, "←", "Back to friends", false).clicked() {
@@ -970,6 +971,7 @@ impl App {
             }
             let (rect, _) = ui.allocate_exact_size(egui::vec2(36., 36.), egui::Sense::hover());
             paint_person(ui, rect, &friend.person.display_name, self.social.avatar_uri(&friend.person), Some(friend.online), ui.visuals().panel_fill);
+            shop_ui::paint_decoration(ui, rect, &friend.person.equipped);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.;
                 ui.label(RichText::new(&friend.person.display_name).size(18.).bold());
@@ -979,11 +981,14 @@ impl App {
         });
         ui.add_space(6.);
         ui.separator();
-        let input_height = 54.;
+        let replying = self.social.chats.get(&id).and_then(|c| c.replying.clone());
+        let input_height = 78. + if replying.is_some() { 46. } else { 0. };
         let room = (ui.available_height() - input_height).max(80.);
         let width = ui.available_width();
         let accent = ui.visuals().selection.bg_fill;
         let messages = self.social.chats.get(&id).map(|c| c.messages.clone()).unwrap_or_default();
+        let reactions = self.social.chats.get(&id).map(|c| c.reactions.clone()).unwrap_or_default();
+        let name = friend.person.display_name.clone();
         egui::ScrollArea::vertical()
             .id_salt(("chat", &id))
             .max_height(room)
@@ -1007,31 +1012,117 @@ impl App {
                     }
                     let next = messages.get(i + 1);
                     let last_of_run = next.is_none_or(|n| n.mine != message.mine || n.at - message.at > 300);
-                    let layout = if message.mine {
-                        egui::Layout::top_down(egui::Align::Max)
-                    } else {
-                        egui::Layout::top_down(egui::Align::Min)
-                    };
-                    ui.with_layout(layout, |ui| {
-                        egui::Frame::new()
-                            .fill(if message.mine { accent.gamma_multiply(0.38) } else { Color32::from_white_alpha(18) })
-                            .corner_radius(14)
-                            .inner_margin(egui::Margin::symmetric(12, 7))
-                            .show(ui, |ui| {
-                                ui.set_max_width((width * 0.7).max(160.));
-                                ui.add(egui::Label::new(RichText::new(&message.body)).wrap());
-                            });
-                        if last_of_run {
-                            ui.label(RichText::new(clock(message.at)).size(10.5).color(MUTED.gamma_multiply(0.8)));
-                            ui.add_space(4.);
+                    // A message that is only an emoji is shown big, with no bubble.
+                    let emoji_only = !message.body.is_empty() && message.body.chars().count() <= 8 && message.body.chars().all(|c| !c.is_alphanumeric() && !c.is_whitespace());
+                    // The emoji font has no selector for "draw it as a picture", so that would show as an empty box.
+                    let plain = |text: &str| text.replace('\u{fe0f}', "");
+                    let marks: Vec<(String, bool)> = reactions.get(&message.id).map(|l| l.iter().map(|(e, m)| (plain(e), *m)).collect()).unwrap_or_default();
+                    let mine_now = marks.iter().find(|(_, mine)| *mine).map(|(e, _)| e.clone());
+                    let row = if message.mine { egui::Layout::right_to_left(egui::Align::Min) } else { egui::Layout::left_to_right(egui::Align::Min) };
+                    ui.with_layout(row, |ui| {
+                        if !message.mine {
+                            let (slot, _) = ui.allocate_exact_size(egui::vec2(28., 28.), egui::Sense::hover());
+                            if last_of_run {
+                                paint_person(ui, slot, &friend.person.display_name, self.social.avatar_uri(&friend.person), None, ui.visuals().panel_fill);
+                            }
                         }
+                        let column = if message.mine { egui::Layout::top_down(egui::Align::Max) } else { egui::Layout::top_down(egui::Align::Min) };
+                        ui.with_layout(column, |ui| {
+                            ui.spacing_mut().item_spacing.y = 2.;
+                            if let Some(quote) = &message.reply {
+                                let who = if message.mine { "You" } else { name.as_str() };
+                                let target = match (quote.mine, message.mine) {
+                                    (true, true) => "yourself".to_owned(),
+                                    (true, false) => "you".to_owned(),
+                                    (false, true) => name.clone(),
+                                    (false, false) => "themselves".to_owned(),
+                                };
+                                ui.label(RichText::new(format!("↩ {who} replied to {target}")).small().color(MUTED));
+                                egui::Frame::new().fill(Color32::from_white_alpha(10)).corner_radius(12).inner_margin(egui::Margin::symmetric(10, 5)).show(ui, |ui| {
+                                    ui.set_max_width((width * 0.6).max(140.));
+                                    ui.add(egui::Label::new(RichText::new(plain(&quote.body)).small().color(MUTED)).truncate());
+                                });
+                            }
+                            let frame = if emoji_only {
+                                egui::Frame::new().inner_margin(egui::Margin::symmetric(2, 0))
+                            } else {
+                                egui::Frame::new()
+                                    .fill(if message.mine { accent.gamma_multiply(0.38) } else { Color32::from_white_alpha(18) })
+                                    .corner_radius(14)
+                                    .inner_margin(egui::Margin::symmetric(12, 7))
+                            };
+                            let bubble = frame
+                                .show(ui, |ui| {
+                                    ui.set_max_width((width * 0.7).max(160.));
+                                    let text = RichText::new(plain(&message.body));
+                                    ui.add(egui::Label::new(if emoji_only { text.size(34.) } else { text }).wrap().selectable(false));
+                                })
+                                .response
+                                .interact(egui::Sense::click())
+                                .on_hover_text("Right-click to react or reply");
+                            bubble.context_menu(|ui| {
+                                ui.horizontal(|ui| {
+                                    for e in QUICK {
+                                        let chosen = mine_now.as_deref() == Some(e);
+                                        let button = egui::Button::new(RichText::new(e).size(22.)).frame(chosen).min_size(egui::vec2(34., 34.));
+                                        if ui.add(button).clicked() {
+                                            self.social.react(&id, message.id, if chosen { None } else { Some(e) });
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                                ui.separator();
+                                if ui.button("↩  Reply").clicked() {
+                                    if let Some(chat) = self.social.chats.get_mut(&id) {
+                                        chat.replying = Some(message.clone());
+                                    }
+                                    ui.close();
+                                }
+                                if ui.button("Copy").clicked() {
+                                    ui.ctx().copy_text(message.body.clone());
+                                    ui.close();
+                                }
+                            });
+                            if !marks.is_empty() {
+                                let mut shown: Vec<&str> = marks.iter().map(|(e, _)| e.as_str()).collect();
+                                shown.dedup();
+                                let text = format!("{}{}", shown.join(""), if marks.len() > 1 { format!(" {}", marks.len()) } else { String::new() });
+                                egui::Frame::new().fill(Color32::from_white_alpha(14)).corner_radius(10).inner_margin(egui::Margin::symmetric(6, 1)).show(ui, |ui| {
+                                    ui.label(RichText::new(text).size(13.));
+                                });
+                            }
+                            if last_of_run {
+                                ui.label(RichText::new(clock(message.at)).size(10.5).color(MUTED.gamma_multiply(0.8)));
+                                ui.add_space(4.);
+                            }
+                        });
                     });
                 }
             });
+        if let Some(target) = &replying {
+            ui.add_space(4.);
+            egui::Frame::new().fill(Color32::from_white_alpha(10)).corner_radius(10).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.;
+                        let who = if target.mine { "yourself".to_owned() } else { friend.person.display_name.clone() };
+                        ui.label(RichText::new(format!("Replying to {who}")).small().bold());
+                        ui.add(egui::Label::new(RichText::new(&target.body).small().color(MUTED)).truncate());
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(egui::Button::new("✕").frame(false)).clicked() {
+                            if let Some(chat) = self.social.chats.get_mut(&id) {
+                                chat.replying = None;
+                            }
+                        }
+                    });
+                });
+            });
+        }
         let mut send = false;
         ui.add_space(6.);
         ui.horizontal(|ui| {
-            let draft = &mut self.social.chats.entry(id.clone()).or_default().draft;
             egui::Frame::new()
                 .fill(ui.visuals().extreme_bg_color)
                 .stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(20)))
@@ -1039,26 +1130,62 @@ impl App {
                 .inner_margin(egui::Margin::symmetric(16, 6))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width() - 56.);
-                    let field = ui.add(
-                        egui::TextEdit::singleline(draft)
-                            .id(egui::Id::new(("chat-input", &id)))
-                            .frame(false)
-                            .char_limit(1000)
-                            .hint_text(format!("Message {}", friend.person.display_name))
-                            .desired_width(f32::INFINITY),
-                    );
-                    if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        send = true;
-                        field.request_focus();
-                    }
+                    ui.horizontal(|ui| {
+                        let draft = &mut self.social.chats.entry(id.clone()).or_default().draft;
+                        let field = ui.add(
+                            egui::TextEdit::singleline(draft)
+                                .id(egui::Id::new(("chat-input", &id)))
+                                .frame(false)
+                                .char_limit(1000)
+                                .hint_text(format!("Message {}", friend.person.display_name))
+                                .desired_width(ui.available_width() - 36.),
+                        );
+                        if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            send = true;
+                            field.request_focus();
+                        }
+                        egui::containers::menu::MenuButton::new(RichText::new("☺").size(20.).color(MUTED))
+                            .config(egui::containers::menu::MenuConfig::default().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
+                            .ui(ui, |ui| {
+                                super::menu_style(ui);
+                                ui.set_width(320.);
+                                egui::ScrollArea::vertical().max_height(340.).show(ui, |ui| {
+                                for (title, set) in EMOJI {
+                                    ui.label(RichText::new(*title).small().bold().color(MUTED));
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing = egui::vec2(2., 2.);
+                                        for e in set.split_whitespace() {
+                                            if ui.add(egui::Button::new(RichText::new(e).size(21.)).frame(false).min_size(egui::vec2(30., 30.))).clicked() {
+                                                draft.push_str(e);
+                                            }
+                                        }
+                                    });
+                                    ui.add_space(4.);
+                                }
+                                });
+                            });
+                    });
                 });
-            let ready = !draft.trim().is_empty();
+            let has_text = self.social.chats.get(&id).is_some_and(|c| !c.draft.trim().is_empty());
             let on_accent = ui.visuals().selection.stroke.color;
-            let button = egui::Button::new(RichText::new("Send").bold().color(on_accent)).fill(accent).corner_radius(18);
-            send |= ui.add_enabled(ready, button).clicked();
+            if has_text {
+                let button = egui::Button::new(RichText::new("Send").bold().color(on_accent)).fill(accent).corner_radius(18);
+                send |= ui.add(button).clicked();
+            } else if ui.add(egui::Button::new(RichText::new("👍").size(22.)).frame(false).min_size(egui::vec2(44., 36.))).on_hover_text("Send a thumbs up").clicked() {
+                self.social.chats.entry(id.clone()).or_default().draft = "👍".to_owned();
+                send = true;
+            }
         });
         if send {
             self.social.send(&id);
         }
     }
 }
+
+/// Emoji for the picker. The app's emoji font is a few years old, so these stay within what it can draw.
+const EMOJI: &[(&str, &str)] = &[
+    ("Faces", "😀 😁 😂 😃 😄 😅 😆 😇 😈 😉 😊 😋 😌 😍 😎 😏 😐 😑 😒 😓 😔 😕 😖 😗 😘 😙 😚 😛 😜 😝 😞 😟 😠 😡 😢 😣 😤 😥 😦 😧 😨 😩 😪 😫 😬 😭 😮 😯 😰 😱 😲 😳 😴 😵 😶 😷"),
+    ("Hands and hearts", "👍 👎 👊 ✊ ✌ 👌 👈 👉 👆 👇 ☝ ✋ 👋 👏 👐 🙌 🙏 💪 👀 ❤ 💔 💕 💖 💗 💘 💙 💚 💛 💜 💝 💞 💟 💓"),
+    ("Animals and food", "🐶 🐱 🐭 🐹 🐰 🐻 🐼 🐨 🐯 🐮 🐷 🐸 🐵 🐔 🐧 🐦 🐢 🐍 🐙 🐠 🐬 🐳 🍎 🍊 🍋 🍌 🍉 🍇 🍓 🍒 🍑 🍍 🍅 🍔 🍕 🍟 🍰 🍩 🍪 ☕ 🍺"),
+    ("Music and fun", "🎵 🎶 🎤 🎧 🎸 🎹 🎺 🎻 🎷 🎬 🎮 🎯 ⚽ 🏀 🎉 🎊 🎁 🔥 ✨ ⭐ 🌟 💯 💥 💫 🌙 ☀ ⚡ 🌈"),
+];

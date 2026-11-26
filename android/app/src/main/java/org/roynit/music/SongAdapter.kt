@@ -30,6 +30,9 @@ interface SongHost {
     /** Closes the page on top, if there is one. */
     fun back()
 
+    /** Opens the full-screen conversation with a friend. */
+    fun openChat(person: org.json.JSONObject)
+
     /** Lets the user crop a picture, then calls [done] with the result (null when cancelled). */
     fun crop(uri: android.net.Uri, circle: Boolean, outW: Int, outH: Int, done: (android.graphics.Bitmap?) -> Unit)
 }
@@ -42,6 +45,7 @@ class SongAdapter(private val context: Context, private val host: SongHost) : Ba
     var songs: List<Song> = emptyList()
         set(value) {
             field = value
+            Images.prefetch(value.map { it.cover }, context.dp(48))
             notifyDataSetChanged()
         }
 

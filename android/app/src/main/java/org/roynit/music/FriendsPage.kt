@@ -28,7 +28,7 @@ import java.io.ByteArrayOutputStream
  * what they are listening to, requests, chat, and your profile with picture, cover, status and Orbs.
  */
 class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
-    private enum class Mode { Friends, Profile, Chat, Person, Shop }
+    private enum class Mode { Friends, Profile, Person, Shop }
 
     private val body = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; clipChildren = false }
     private val scroll = ScrollView(context).apply { isVerticalScrollBarEnabled = false; clipChildren = false; addView(body) }
@@ -38,8 +38,6 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
     private var mode = Mode.Friends
     private var social = JSONObject()
     private var suggestions = emptyList<JSONObject>()
-    private var chatWith: JSONObject? = null
-    private var lastMessage = 0L
     private var shown = false
     private var picking = 0
 
@@ -59,42 +57,17 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
     private val poll = object : Runnable {
         override fun run() {
             if (shown && Account.signedIn) {
-                if (mode == Mode.Chat) loadChat(false) else if (mode == Mode.Friends) loadFriends()
+                if (mode == Mode.Friends) loadFriends()
             }
-            ui.postDelayed(this, if (mode == Mode.Chat) 1_500 else 20_000)
+            ui.postDelayed(this, 20_000)
         }
     }
 
-    private val messages = ArrayList<JSONObject>()
-    private val chatList = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL; setPadding(c.dp(16), c.dp(8), c.dp(16), c.dp(8)) }
-    private val chatScroll = ScrollView(c).apply { isVerticalScrollBarEnabled = false; addView(chatList) }
-    private val chatHead = LinearLayout(c).apply { clipChildren = false; gravity = Gravity.CENTER_VERTICAL; setPadding(c.dp(8), c.dp(6), c.dp(16), c.dp(6)) }
-    private val chatField = EditText(c).apply {
-        hint = "Message"
-        setHintTextColor(Ui.MUTED)
-        setTextColor(Color.WHITE)
-        background = null
-        inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-        maxLines = 4
-        setPadding(c.dp(18), c.dp(12), c.dp(8), c.dp(12))
-    }
-    private val chatRoot = LinearLayout(c).apply {
-        orientation = LinearLayout.VERTICAL
-        visibility = GONE
-        addView(chatHead)
-        addView(View(c).apply { setBackgroundColor(0x22FFFFFF) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
-        addView(chatScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-    }
-    private val clock = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
-    private val dayFormat = java.text.SimpleDateFormat("d MMMM yyyy", java.util.Locale.getDefault())
-
     init {
         addView(scroll, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        addView(chatRoot, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         addView(effectView, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         addView(frameView, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         Shop.load(context)
-        buildComposer()
         body.setPadding(c.dp(20), c.dp(16), c.dp(20), c.dp(16))
         Account.load(context)
         render()
@@ -106,7 +79,6 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
     /** Called when the tab comes to the front or goes away. */
     fun visible(on: Boolean) {
         shown = on
-        if (!on) Notifier.chatOpenWith = null
         if (on) {
             mode = Mode.Friends
             if (Account.signedIn) {
@@ -117,7 +89,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
         }
     }
 
-    /** Back button: leaves a chat or the profile first. */
+    /** Back button: leaves the profile or the shop first. */
     fun back(): Boolean {
         if (mode == Mode.Friends) return false
         mode = if (mode == Mode.Shop && Account.signedIn) Mode.Profile else Mode.Friends
@@ -189,8 +161,6 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
     // ---- screens ----
 
     private fun render() {
-        Notifier.chatOpenWith = if (mode == Mode.Chat && shown) chatWith?.optString("id") else null
-        val chat = Account.signedIn && mode == Mode.Chat
         val profile = Account.signedIn && (mode == Mode.Profile || mode == Mode.Person)
         // A frame and an effect belong to the profile on screen, and to nothing else.
         val worn = when {
@@ -201,8 +171,6 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
         }
         Shop.worn(worn, "frame").let { frameView.show(it?.first, it?.second) }
         Shop.worn(worn, "effect").let { effectView.show(it?.first, it?.second) }
-        scroll.visibility = if (chat) GONE else VISIBLE
-        chatRoot.visibility = if (chat) VISIBLE else GONE
         body.removeAllViews()
         // The profile runs edge to edge so its cover can; everything else has a margin.
         body.setPadding(if (profile) 0 else c.dp(20), if (profile) 0 else c.dp(16), if (profile) 0 else c.dp(20), c.dp(16))
@@ -211,7 +179,6 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
             mode == Mode.Person -> drawPerson()
             mode == Mode.Shop -> shop.draw(body)
             profile -> drawProfile()
-            chat -> drawChat()
             else -> drawFriends()
         }
     }
@@ -330,6 +297,12 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
             val people = (0 until (found?.length() ?: 0)).map { found!!.getJSONObject(it) }
             ui.post {
                 suggestions = people
+                // Their pictures are ready before the list is drawn.
+                val friends = reply.optJSONArray("friends")
+                val pictures = ArrayList<String?>()
+                for (i in 0 until (friends?.length() ?: 0)) friends!!.getJSONObject(i).let { f -> pictures += Account.avatarUrl(f.optString("id"), f.optInt("avatar_version")) }
+                people.forEach { p -> pictures += Account.avatarUrl(p.optString("id"), p.optInt("avatar_version")) }
+                Images.prefetch(pictures, c.dp(44))
                 if (reply.has("error")) {
                     if (mode == Mode.Friends && !Account.signedIn) render()
                     social = reply
@@ -431,7 +404,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
     private var details: JSONObject? = null
 
     /** Opens someone's profile card: cover, picture, bio, the friends you share, and a Message button. */
-    private fun openPerson(person: JSONObject) {
+    fun openPerson(person: JSONObject) {
         viewing = person
         details = null
         mode = Mode.Person
@@ -501,7 +474,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
         fun put(view: View) = actions.addView(view, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { if (actions.childCount > 0) marginStart = c.dp(10) })
         when (relation) {
             "friend" -> {
-                put(wideButton("Message", true) { chatWith = person; lastMessage = 0; mode = Mode.Chat; render(); loadChat(true) })
+                put(wideButton("Message", true) { host.openChat(person) })
                 put(wideButton("Blend", false) { Blend.make(c as Activity, host, id, name) })
             }
             "incoming" -> {
@@ -572,7 +545,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
 
     private fun friendMenu(person: JSONObject, listening: JSONObject?) {
         val options = ArrayList<Pair<String, () -> Unit>>()
-        options += "Message" to { chatWith = person; lastMessage = 0; mode = Mode.Chat; render(); loadChat(true) }
+        options += "Message" to { host.openChat(person) }
         options += "Blend our music" to { Blend.make(c as Activity, host, person.optString("id"), person.optString("display_name")) }
         if (listening != null) options += "Find what they are playing" to { host.search("${listening.optString("title")} ${listening.optString("artist")}") }
         options += "Remove friend" to {
@@ -628,121 +601,6 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
             }.start()
         }
     }
-
-    private fun buildComposer() {
-        val send = c.icon(R.drawable.ic_send, Color.BLACK, 40, 10).apply { background = roundRect(Color.WHITE, c.dp(20)) }
-        val pill = LinearLayout(c).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            background = roundRect(Ui.SURFACE, c.dp(26))
-            setPadding(0, c.dp(2), c.dp(6), c.dp(2))
-            addView(chatField, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(send)
-        }
-        chatRoot.addView(pill, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(c.dp(12), c.dp(6), c.dp(12), c.dp(12)) })
-        send.setOnClickListener {
-            val person = chatWith ?: return@setOnClickListener
-            val text = chatField.text.toString().trim()
-            if (text.isEmpty()) return@setOnClickListener
-            chatField.setText("")
-            // Show it at once; the server's answer replaces this placeholder.
-            val placeholder = JSONObject().put("id", -1).put("mine", true).put("body", text).put("at", System.currentTimeMillis() / 1000)
-            messages += placeholder
-            drawMessages()
-            Thread {
-                val reply = Account.call("POST", "/messages/${person.optString("id")}", JSONObject().put("body", text))
-                ui.post {
-                    messages.remove(placeholder)
-                    if (!failed(reply) && messages.none { it.optLong("id") == reply.optLong("id") }) {
-                        messages += reply
-                        lastMessage = maxOf(lastMessage, reply.optLong("id"))
-                    }
-                    drawMessages()
-                }
-            }.start()
-        }
-    }
-
-    private fun drawChat() {
-        val person = chatWith ?: return
-        chatHead.removeAllViews()
-        chatHead.addView(c.icon(R.drawable.ic_down, Color.WHITE, 44, 10).apply { rotation = 90f; setOnClickListener { back() } })
-        chatHead.addView(avatar(person.optString("display_name"), Account.avatarUrl(person.optString("id"), person.optInt("avatar_version")), 38, person.optJSONObject("equipped")), side(2))
-        chatHead.addView(LinearLayout(c).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(c.label(17f, Color.WHITE, bold = true).apply { text = person.optString("display_name") })
-            addView(c.label(12f, Ui.MUTED).apply { text = "@" + person.optString("username") })
-        }, side(12))
-        drawMessages()
-    }
-
-    /** Messages the way Discord lays them out: a name and time above each run of messages, then plain lines. */
-    private fun drawMessages() {
-        val person = chatWith ?: return
-        chatList.removeAllViews()
-        var previousMine: Boolean? = null
-        var previousAt = 0L
-        var previousDay = ""
-        for (message in messages) {
-            val at = message.optLong("at")
-            val mine = message.optBoolean("mine")
-            val day = dayFormat.format(java.util.Date(at * 1000))
-            if (day != previousDay) {
-                chatList.addView(LinearLayout(c).apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                    addView(View(c).apply { setBackgroundColor(0x22FFFFFF) }, LinearLayout.LayoutParams(0, 1, 1f))
-                    addView(c.label(12f, Ui.MUTED, bold = true).apply { text = day; setPadding(c.dp(10), 0, c.dp(10), 0) })
-                    addView(View(c).apply { setBackgroundColor(0x22FFFFFF) }, LinearLayout.LayoutParams(0, 1, 1f))
-                }, wide(14))
-            }
-            val startsRun = day != previousDay || previousMine != mine || at - previousAt > 300
-            if (startsRun) {
-                val name = if (mine) Account.name else person.optString("display_name")
-                val picture = if (mine) link(Account.profile, "avatar_url") else Account.avatarUrl(person.optString("id"), person.optInt("avatar_version"))
-                chatList.addView(LinearLayout(c).apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                    addView(avatar(name, picture, 40))
-                    addView(c.label(15f, Color.WHITE, bold = true).apply { text = name }, side(12))
-                    addView(c.label(12f, Ui.MUTED).apply { text = clock.format(java.util.Date(at * 1000)) }, side(8))
-                }, wide(14))
-            }
-            chatList.addView(c.label(15f, 0xFFE6E6E6.toInt(), lines = 100).apply {
-                text = message.optString("body")
-                ellipsize = null
-                setTextIsSelectable(true)
-                setPadding(c.dp(52), c.dp(if (startsRun) 4 else 2), 0, 0)
-            })
-            previousMine = mine
-            previousAt = at
-            previousDay = day
-        }
-        if (messages.isEmpty()) chatList.addView(note("No messages yet. Say hello to ${person.optString("display_name")}!"))
-        chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
-    }
-
-    private fun loadChat(first: Boolean) {
-        val person = chatWith ?: return
-        if (first) messages.clear()
-        Thread {
-            val reply = Account.call("GET", "/messages/${person.optString("id")}?after=$lastMessage&read=1")
-            val found = reply.optJSONArray("messages")
-            ui.post {
-                if (mode != Mode.Chat || found == null) return@post
-                var news = false
-                for (i in 0 until found.length()) {
-                    val m = found.getJSONObject(i)
-                    if (m.optLong("id") > lastMessage) {
-                        if (m.optBoolean("mine")) messages.removeAll { it.optLong("id") < 0 && it.optString("body") == m.optString("body") }
-                        messages += m
-                        lastMessage = m.optLong("id")
-                        news = true
-                    }
-                }
-                if (news || first) drawMessages()
-            }
-        }.start()
-    }
-
-    // ---- profile ----
 
     private fun card(vararg views: View) = LinearLayout(c).apply {
         orientation = LinearLayout.VERTICAL

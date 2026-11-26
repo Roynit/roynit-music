@@ -54,6 +54,16 @@ pub struct Message {
     pub mine: bool,
     pub body: String,
     pub at: i64,
+    /// The message this one answers.
+    pub reply: Option<Quote>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Quote {
+    pub id: i64,
+    pub mine: bool,
+    pub body: String,
 }
 
 #[derive(Default, Deserialize)]
@@ -72,6 +82,10 @@ struct Snapshot {
 pub struct Chat {
     pub messages: Vec<Message>,
     pub draft: String,
+    /// Reactions by message id: (emoji, whether it is mine).
+    pub reactions: HashMap<i64, Vec<(String, bool)>>,
+    /// The message the next one will answer.
+    pub replying: Option<Message>,
     /// Scroll to the newest message on the next frame.
     pub stick: bool,
     loaded: bool,
@@ -105,6 +119,7 @@ enum Tag {
     Shop,
     Quests,
     ShopAct,
+    React,
 }
 
 type Reply = Result<Value, String>;
@@ -336,9 +351,30 @@ impl Social {
         }
         chat.draft.clear();
         // Show it at once; the server's answer replaces this placeholder (its id is negative).
-        chat.messages.push(Message { id: -1, mine: true, body: body.clone(), at: now_seconds() });
+        let reply = chat.replying.take();
+        let quote = reply.as_ref().map(|m| Quote { id: m.id, mine: m.mine, body: m.body.chars().take(120).collect() });
+        chat.messages.push(Message { id: -1, mine: true, body: body.clone(), at: now_seconds(), reply: quote });
         chat.stick = true;
-        self.call(Tag::Send(id.to_owned()), reqwest::Method::POST, format!("/messages/{id}"), Some(json!({"body":body})));
+        let mut payload = json!({"body":body});
+        if let Some(target) = reply.filter(|m| m.id > 0) {
+            payload["reply_to"] = json!(target.id);
+        }
+        self.call(Tag::Send(id.to_owned()), reqwest::Method::POST, format!("/messages/{id}"), Some(payload));
+    }
+
+    /// Reacts to a message with an emoji (None takes your reaction back). Shown at once; the server catches up.
+    pub fn react(&mut self, id: &str, message: i64, emoji: Option<&str>) {
+        if message <= 0 {
+            return;
+        }
+        if let Some(chat) = self.chats.get_mut(id) {
+            let list = chat.reactions.entry(message).or_default();
+            list.retain(|(_, mine)| !mine);
+            if let Some(e) = emoji {
+                list.push((e.to_owned(), true));
+            }
+        }
+        self.call(Tag::React, reqwest::Method::POST, format!("/messages/{id}/{message}/react"), Some(json!({"emoji": emoji})));
     }
 
     pub fn open_chat(&mut self, id: &str) {
@@ -451,6 +487,18 @@ impl Social {
                     }
                 }
                 chat.messages.extend(fresh);
+                // The server sends the reactions of the newest messages every time; those messages take them as they are.
+                if let Some(map) = data["reactions"].as_object() {
+                    let newest = chat.messages.iter().map(|m| m.id).max().unwrap_or(0);
+                    for m in chat.messages.iter().filter(|m| m.id > 0 && m.id >= newest - 60) {
+                        let list: Vec<(String, bool)> = map
+                            .get(&m.id.to_string())
+                            .and_then(Value::as_array)
+                            .map(|a| a.iter().filter_map(|r| Some((r["emoji"].as_str()?.to_owned(), r["mine"].as_bool().unwrap_or(false)))).collect())
+                            .unwrap_or_default();
+                        chat.reactions.insert(m.id, list);
+                    }
+                }
                 chat.loaded = true;
                 chat.stick |= any;
                 if any {
@@ -458,10 +506,11 @@ impl Social {
                 }
             }
             (Tag::Send(id), Ok(data)) => {
-                if let Ok(message) = serde_json::from_value::<Message>(data) {
+                if let Ok(mut message) = serde_json::from_value::<Message>(data) {
                     let chat = self.chats.entry(id).or_default();
                     if let Some(at) = chat.messages.iter().position(|m| m.id < 0 && m.body == message.body) {
-                        chat.messages.remove(at);
+                        // The server does not echo the quote back; the placeholder still has it.
+                        message.reply = chat.messages.remove(at).reply;
                     }
                     if chat.messages.iter().all(|m| m.id != message.id) {
                         chat.messages.push(message);
@@ -525,7 +574,7 @@ impl Social {
             }
             (Tag::Act(_), Err(error)) => self.notice = Some((error, true)),
             // A refresh that fails just waits for the next one.
-            (Tag::Social | Tag::Suggest | Tag::Chat(_) | Tag::Presence, _) => {}
+            (Tag::Social | Tag::Suggest | Tag::Chat(_) | Tag::Presence | Tag::React, _) => {}
         }
     }
 }

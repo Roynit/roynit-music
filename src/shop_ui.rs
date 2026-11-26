@@ -289,6 +289,7 @@ impl App {
         if let Some(equipped) = self.social.equipped_changed.take() {
             self.roy_account.set_equipped(equipped);
         }
+        ctx.request_repaint_after(Duration::from_millis(250));
         let top = self.dialog_top();
         let screen = ctx.content_rect();
         let width = (screen.width() - 120.).clamp(520., 760.);
@@ -300,7 +301,7 @@ impl App {
                 ui.label(RichText::new("Shop").size(26.).bold());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     egui::Frame::new().fill(Color32::from_white_alpha(14)).corner_radius(14).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
-                        ui.label(RichText::new(format!("◆  {orbs}")).bold());
+                        ui.label(RichText::new(format!("{orbs} Orbs")).bold());
                     });
                 });
             });
@@ -317,7 +318,7 @@ impl App {
                 ui.label(RichText::new(text).color(Color32::from_rgb(255, 170, 178)));
             }
             ui.add_space(8.);
-            egui::ScrollArea::vertical().max_height(height).auto_shrink([false, true]).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(height).auto_shrink([false, false]).show(ui, |ui| {
                 if self.shop_tab == "quests" {
                     self.quests_view(ui);
                 } else {
@@ -357,7 +358,7 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(tier.to_uppercase()).small().bold().color(accent));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(format!("◆ {}", quest["orbs"].as_u64().unwrap_or(0))).bold());
+                        ui.label(RichText::new(format!("{} Orbs", quest["orbs"].as_u64().unwrap_or(0))).bold());
                     });
                 });
                 ui.label(RichText::new(quest["title"].as_str().unwrap_or("")).size(16.).bold());
@@ -372,7 +373,7 @@ impl App {
                         if claimed {
                             ui.add_enabled(false, egui::Button::new("Claimed").corner_radius(16));
                         } else if done {
-                            let button = egui::Button::new(RichText::new(format!("Claim ◆ {}", quest["orbs"].as_u64().unwrap_or(0))).bold().color(Color32::BLACK)).fill(Color32::WHITE).corner_radius(16);
+                            let button = egui::Button::new(RichText::new(format!("Claim {} Orbs", quest["orbs"].as_u64().unwrap_or(0))).bold().color(Color32::BLACK)).fill(Color32::WHITE).corner_radius(16);
                             if ui.add(button).clicked() {
                                 self.social.shop_act("/quests/claim", json!({"id": quest["id"]}));
                             }
@@ -408,7 +409,8 @@ impl App {
                     let variant = &item.variants[choice];
                     let key = format!("{}:{}", item.id, variant.id);
                     let price = prices.get(item.id.as_str()).copied().unwrap_or(item.price);
-                    egui::Frame::new().fill(Color32::from_white_alpha(10)).corner_radius(14).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                    // A card lays its parts out top to bottom, even though the row of cards runs left to right.
+                    ui.allocate_ui_with_layout(egui::vec2(card_width, 0.), egui::Layout::top_down(egui::Align::Min), |ui| egui::Frame::new().fill(Color32::from_white_alpha(10)).corner_radius(14).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
                         ui.set_width(card_width - 20.);
                         self.preview(ui, item, variant, card_width - 20.);
                         ui.add_space(6.);
@@ -439,9 +441,9 @@ impl App {
                                 self.social.shop_act("/me/equip", json!({"kind": item.kind, "item": item.id, "variant": variant.id}));
                             }
                         } else if orbs < price {
-                            ui.add_enabled_ui(false, |ui| ui.add_sized(wide, egui::Button::new(format!("◆ {price}")).corner_radius(16)));
+                            ui.add_enabled_ui(false, |ui| ui.add_sized(wide, egui::Button::new(format!("{price} Orbs")).corner_radius(16)));
                         } else {
-                            let button = egui::Button::new(RichText::new(format!("Buy  ◆ {price}")).bold().color(Color32::BLACK)).fill(Color32::WHITE).corner_radius(16);
+                            let button = egui::Button::new(RichText::new(format!("Buy for {price} Orbs")).bold().color(Color32::BLACK)).fill(Color32::WHITE).corner_radius(16);
                             if ui.add_sized(wide, button).clicked() {
                                 let sure = rfd::MessageDialog::new()
                                     .set_title(format!("Buy {}?", item.name))
@@ -454,7 +456,7 @@ impl App {
                                 }
                             }
                         }
-                    });
+                    }));
                 }
             });
             ui.add_space(12.);

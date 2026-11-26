@@ -467,3 +467,31 @@ test("shop: buy once, wear what you own, friends see it", async () => {
   shop = await request("/me/equip", "POST", { kind: "decoration", item: null }, a.token);
   assert.deepEqual(shop.equipped, {});
 });
+
+test("chat: replies quote the message they answer, and each person can react once per message", async () => {
+  const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
+  const password = "local-" + crypto.randomUUID();
+  const make = (tag) => request("/register", "POST", { email: tag + nonce + "@example.test", username: tag + "_" + nonce, password });
+  const [a, b, c] = [await make("ra"), await make("rb"), await make("rc")];
+  await request("/friends/request", "POST", { username: b.account.username }, a.token);
+  await request("/friends/accept", "POST", { id: a.account.id }, b.token);
+  const sent = await request("/messages/" + b.account.id, "POST", { body: "quoted one" }, a.token);
+  const answered = await request("/messages/" + a.account.id, "POST", { body: "answer", reply_to: sent.id }, b.token);
+  await request("/messages/" + a.account.id, "POST", { body: "x", reply_to: 999999 }, b.token, 404);
+  let view = await request("/messages/" + a.account.id + "?after=" + (answered.id - 1), "GET", undefined, b.token);
+  assert.equal(view.messages[0].reply.body, "quoted one");
+  assert.equal(view.messages[0].reply.mine, false);
+  const heart = "❤️";
+  const thumbs = "👍";
+  await request("/messages/" + a.account.id + "/" + sent.id + "/react", "POST", { emoji: heart }, b.token);
+  await request("/messages/" + a.account.id + "/" + sent.id + "/react", "POST", { emoji: thumbs }, b.token);
+  await request("/messages/" + b.account.id + "/" + sent.id + "/react", "POST", { emoji: heart }, a.token);
+  view = await request("/messages/" + b.account.id + "?after=" + answered.id, "GET", undefined, a.token);
+  assert.deepEqual(view.reactions[sent.id].map((r) => [r.emoji, r.mine]).sort(), [[heart, true], [thumbs, false]].sort());
+  await request("/messages/" + a.account.id + "/" + sent.id + "/react", "POST", { emoji: "hello" }, b.token, 400);
+  await request("/messages/" + a.account.id + "/" + sent.id + "/react", "POST", { emoji: null }, b.token);
+  view = await request("/messages/" + b.account.id + "?after=" + answered.id, "GET", undefined, a.token);
+  assert.deepEqual(view.reactions[sent.id].map((r) => r.emoji), [heart]);
+  // A stranger can neither read nor react.
+  await request("/messages/" + a.account.id + "/" + sent.id + "/react", "POST", { emoji: heart }, c.token, 403);
+});

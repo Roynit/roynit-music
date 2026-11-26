@@ -2,6 +2,7 @@
 mod friends;
 mod crop_ui;
 mod friends_ui;
+mod image_cache;
 mod import_ui;
 mod notify;
 mod shop_assets;
@@ -328,6 +329,7 @@ impl App {
     fn new(cc: &eframe::CreationContext<'_>, root: PathBuf, background: bool) -> Self {
         let ctx = &cc.egui_ctx;
         egui_extras::install_image_loaders(ctx);
+        image_cache::DiskImages::install(ctx, root.join("cache").join("pictures"));
         let mut fonts = egui::FontDefinitions::default();
         for (key, file) in [("system", "segoeui.ttf"), ("bold", "segoeuib.ttf")] {
             if let Ok(bytes) = std::fs::read(format!("C:\\Windows\\Fonts\\{file}")) {
@@ -5130,7 +5132,7 @@ impl App {
                 self.open_import();
                 ui.close();
             }
-            if self.nav_item(ui, "◆", "Orbs shop and quests", self.shop_open).clicked() {
+            if self.nav_item(ui, "🎁", "Orbs shop and quests", self.shop_open).clicked() {
                 self.open_shop();
                 ui.close();
             }
@@ -7987,6 +7989,7 @@ impl eframe::App for App {
         }
         self.friends_tick();
         self.notify_tick();
+        image_cache::prefetch(ctx, self.social.friends.iter().filter_map(|f| self.social.avatar_uri(&f.person)).chain(self.social.suggestions.iter().filter_map(|p| self.social.avatar_uri(p))));
         self.player_bar(ctx);
         self.search_bar(ctx);
         if self.page == Page::Friends {

@@ -36,6 +36,7 @@ class MainActivity : Activity(), SongHost {
     private lateinit var search: SearchPage
     private lateinit var library: LibraryPage
     private lateinit var friends: FriendsPage
+    private lateinit var chat: ChatView
     private lateinit var pages: List<Page>
     private lateinit var nowPlaying: NowPlayingView
     private lateinit var cropper: CropView
@@ -88,6 +89,7 @@ class MainActivity : Activity(), SongHost {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Images.init(this)
         Library.load(this)
         Account.load(this)
         Sync.load(this)
@@ -138,6 +140,7 @@ class MainActivity : Activity(), SongHost {
     @Deprecated("Back is handled by hand so the full player and playlists close first")
     override fun onBackPressed() {
         when {
+            chat.isOpen -> chat.back()
             drawer.isOpen -> drawer.close()
             cropper.visibility == View.VISIBLE -> { cropper.visibility = View.GONE; cropDone?.invoke(null); cropDone = null }
             nowPlaying.isOpen -> nowPlaying.close()
@@ -178,6 +181,8 @@ class MainActivity : Activity(), SongHost {
         frame.addView(detail, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         drawer = DrawerView(this, { select(it) }, { select(2); library.showRecents() }, { select(3); friends.openShop() })
         root.addView(drawer, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        chat = ChatView(this, { person -> chat.close(); select(3); friends.openPerson(person) }, { })
+        root.addView(chat, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         cropper = CropView(this) { bitmap -> cropDone?.invoke(bitmap); cropDone = null }
         root.addView(cropper, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         // The system bars sit over the app on recent Android; keep the content clear of them.
@@ -193,6 +198,10 @@ class MainActivity : Activity(), SongHost {
             nowPlaying.setPadding(0, top, 0, bottom)
             cropper.setPadding(0, top, 0, bottom)
             drawer.setPadding(0, top, 0, bottom)
+            // From Android 15 the window no longer shrinks for the keyboard; it reports the keyboard's height instead, and the
+            // chat lifts its message box by that. On older Android the window shrinks by itself and reports nothing here.
+            val keyboard = if (Build.VERSION.SDK_INT >= 30) insets.getInsets(WindowInsets.Type.ime()).bottom else 0
+            chat.setPadding(0, top, 0, maxOf(bottom, keyboard))
             insets
         }
         return root
@@ -389,6 +398,10 @@ class MainActivity : Activity(), SongHost {
         // The full player sits above the pages, so it steps aside first.
         if (nowPlaying.isOpen) nowPlaying.close()
         detail.open(item)
+    }
+
+    override fun openChat(person: org.json.JSONObject) {
+        chat.open(person)
     }
 
     override fun back() {

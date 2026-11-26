@@ -658,6 +658,7 @@ async function socialRoute(request, env, user, path, url) {
     const [low, high] = pairOf(user.id, removal[1]);
     await env.DB.batch([
       env.DB.prepare("DELETE FROM friendships WHERE low=? AND high=?").bind(low, high),
+      env.DB.prepare("DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE low=? AND high=?)").bind(low, high),
       env.DB.prepare("DELETE FROM messages WHERE low=? AND high=?").bind(low, high),
     ]);
     return reply({ok:true});
@@ -714,19 +715,59 @@ async function socialRoute(request, env, user, path, url) {
     const [low, high] = pairOf(user.id, chat[1]);
     if (request.method === "GET") {
       const after = Number.parseInt(url.searchParams.get("after") || "0", 10) || 0;
-      const {results} = await env.DB.prepare("SELECT id,sender,body,created_at FROM messages WHERE low=? AND high=? AND id>? ORDER BY id DESC LIMIT 100").bind(low, high, after).all();
+      const {results} = await env.DB.prepare(
+        "SELECT m.id,m.sender,m.body,m.created_at,m.reply_to,r.sender AS reply_sender,r.body AS reply_body FROM messages m LEFT JOIN messages r ON r.id=m.reply_to "
+        + "WHERE m.low=? AND m.high=? AND m.id>? ORDER BY m.id DESC LIMIT 100"
+      ).bind(low, high, after).all();
       if (url.searchParams.get("read") === "1") {
         await env.DB.prepare("UPDATE messages SET read=1 WHERE low=? AND high=? AND sender=? AND read=0").bind(low, high, chat[1]).run();
       }
-      return reply({messages:results.reverse().map((m) => ({id:m.id, mine:m.sender === user.id, body:m.body, at:m.created_at}))});
+      // Reactions on the latest messages come with every poll, since a reaction changes without a new message.
+      const found = await env.DB.prepare(
+        "SELECT x.message_id,x.user_id,x.emoji FROM message_reactions x JOIN messages m ON m.id=x.message_id "
+        + "WHERE m.low=?1 AND m.high=?2 AND m.id>(SELECT COALESCE(MAX(id),0)-60 FROM messages WHERE low=?1 AND high=?2)"
+      ).bind(low, high).all();
+      const reactions = Object.create(null);
+      for (const x of found.results) (reactions[x.message_id] ||= []).push({emoji:x.emoji, mine:x.user_id === user.id});
+      return reply({
+        messages:results.reverse().map((m) => ({id:m.id, mine:m.sender === user.id, body:m.body, at:m.created_at,
+          reply:m.reply_to ? {id:m.reply_to, mine:m.reply_sender === user.id, body:(m.reply_body || "").slice(0, 120)} : null})),
+        reactions,
+      });
     }
     if (request.method === "POST") {
       await rate(env, request, "message", 150, user.id);
-      const body = str((await json(request, 4096)).body).replace(/\r\n/g, "\n").trim();
+      const input = await json(request, 4096);
+      const body = str(input.body).replace(/\r\n/g, "\n").trim();
       if (!body || body.length > 1000) throw new HttpError(400, "Write a message up to 1000 characters.");
-      const row = await env.DB.prepare("INSERT INTO messages(low,high,sender,body,created_at) VALUES (?,?,?,?,?) RETURNING id,created_at").bind(low, high, user.id, body, now()).first();
-      return reply({id:row.id, mine:true, body, at:row.created_at});
+      let replyTo = null;
+      if (input.reply_to !== undefined && input.reply_to !== null) {
+        const target = await env.DB.prepare("SELECT id FROM messages WHERE id=? AND low=? AND high=?").bind(Number(input.reply_to) || 0, low, high).first();
+        if (!target) throw new HttpError(404, "That message is gone.");
+        replyTo = target.id;
+      }
+      const row = await env.DB.prepare("INSERT INTO messages(low,high,sender,body,created_at,reply_to) VALUES (?,?,?,?,?,?) RETURNING id,created_at").bind(low, high, user.id, body, now(), replyTo).first();
+      return reply({id:row.id, mine:true, body, at:row.created_at, reply:null});
     }
+  }
+  const react = path.match(/^\/messages\/([0-9a-f-]{36})\/(\d{1,12})\/react$/);
+  if (react && request.method === "POST") {
+    await rate(env, request, "react", 240, user.id);
+    await requireFriend(env, user.id, react[1]);
+    const [low, high] = pairOf(user.id, react[1]);
+    const id = Number(react[2]);
+    const message = await env.DB.prepare("SELECT id FROM messages WHERE id=? AND low=? AND high=?").bind(id, low, high).first();
+    if (!message) throw new HttpError(404, "That message is gone.");
+    const emoji = (await json(request, 1024)).emoji;
+    if (emoji === null || emoji === undefined || emoji === "") {
+      await env.DB.prepare("DELETE FROM message_reactions WHERE message_id=? AND user_id=?").bind(id, user.id).run();
+    } else {
+      const text = str(emoji).trim();
+      // One emoji (a few code points at most), never text pretending to be one.
+      if (!text || [...text].length > 8 || !/\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(text)) throw new HttpError(400, "Pick an emoji.");
+      await env.DB.prepare("INSERT INTO message_reactions(message_id,user_id,emoji) VALUES (?,?,?) ON CONFLICT(message_id,user_id) DO UPDATE SET emoji=excluded.emoji").bind(id, user.id, text).run();
+    }
+    return reply({ok:true});
   }
   return null;
 }

@@ -1,3 +1,9 @@
+# Roy Music 0.3.2
+
+- Chat like Messenger: react to a message (right-click), reply with a quote, copy, and pick emoji from a panel.
+- Pictures (covers, avatars) are kept on disk and load at once after the first time; upcoming ones are fetched ahead.
+- Fixed the Orbs shop layout.
+
 # Roy Music 0.3.1
 
 - Orbs shop and daily listening quests: earn Orbs by listening, spend them on avatar decorations, nameplates, profile frames and effects.
