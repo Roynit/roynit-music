@@ -279,6 +279,11 @@ struct App {
     update_info: Value,
     update_checked: bool,
     update_staging: bool,
+    /// Update now was pressed: install as soon as the download is verified.
+    update_now: bool,
+    update_dismissed: bool,
+    /// A short answer to a manual "Check for updates" when there is nothing new.
+    update_flash: Option<(String, std::time::Instant)>,
     background: bool,
     quiet_frames: u8,
     startup_supported: bool,
@@ -572,6 +577,9 @@ impl App {
             update_info: json!({}),
             update_checked: false,
             update_staging: false,
+            update_now: false,
+            update_dismissed: false,
+            update_flash: None,
             background,
             quiet_frames: if background && has_tray { 6 } else { 0 },
             startup_supported: riff_core::startup::is_installed_copy(),
@@ -810,7 +818,14 @@ impl App {
             "update" | "update-silent" => {
                 self.update_info = data;
                 if tag == "update" {
-                    self.status = "Update check complete".into();
+                    self.update_dismissed = false;
+                    self.status = match (self.update_info["available"] == true, self.update_info["version"].as_str()) {
+                        (true, Some(version)) => format!("Update {version} is available"),
+                        _ => format!("You are up to date ({})", env!("CARGO_PKG_VERSION")),
+                    };
+                    if self.update_info["available"] != true {
+                        self.update_flash = Some((self.status.clone(), std::time::Instant::now()));
+                    }
                 }
                 self.stage_update_quietly();
             }
@@ -828,6 +843,13 @@ impl App {
                         "settings.set",
                         json!({"pending_update":{"version":version,"path":path,"sha256":sha256}}),
                     );
+                    if self.update_now {
+                        self.update_now = false;
+                        self.launch_update(std::path::Path::new(path));
+                    }
+                } else if self.update_now {
+                    self.update_now = false;
+                    self.error = Some("The update could not be downloaded and verified. Check your connection and try again.".into());
                 }
             }
             "support" => {
@@ -1737,17 +1759,102 @@ impl App {
         if !bytes.starts_with(b"MZ") || !format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(sha256) {
             return false;
         }
+        self.launch_update(&path)
+    }
+    /// Starts a verified installer, which waits for this app to close, installs over it and opens it again.
+    fn launch_update(&mut self, path: &std::path::Path) -> bool {
         let started = riff_core::tools::command(&path.to_string_lossy())
             .args(["--install", "--wait-pid", &std::process::id().to_string(), "--launch", "--data-dir"])
             .arg(&self.data_root)
             .args(self.background.then_some("--startup"))
             .spawn();
         if started.is_err() {
+            self.error = Some("Couldn't start the update installer.".into());
             return false;
         }
         self.shutdown.store(true, Ordering::Relaxed);
         self.quit_for_update = true;
         true
+    }
+    /// A bar across the top of the window whenever a newer version exists, so nobody has to dig through Settings.
+    fn update_banner(&mut self, ctx: &egui::Context) {
+        if self.update_info["available"] != true {
+            if let Some((text, at)) = self.update_flash.clone() {
+                if at.elapsed() < std::time::Duration::from_secs(4) {
+                    let visuals = &ctx.style().visuals;
+                    let (fill, ink) = (visuals.selection.bg_fill, visuals.selection.stroke.color);
+                    egui::TopBottomPanel::top("update_banner")
+                        .frame(egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(16, 6)))
+                        .show(ctx, |ui| {
+                            ui.label(RichText::new(text).color(ink).bold());
+                        });
+                    ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                } else {
+                    self.update_flash = None;
+                }
+            }
+            return;
+        }
+        if self.update_dismissed {
+            return;
+        }
+        let version = self.update_info["version"].as_str().unwrap_or("").to_owned();
+        let pending = self
+            .library
+            .settings
+            .get("pending_update")
+            .filter(|p| p["version"].as_str() == Some(version.as_str()))
+            .and_then(|p| p["path"].as_str())
+            .map(str::to_owned);
+        let staged = self.update_info["staged_path"].as_str().map(str::to_owned);
+        let visuals = &ctx.style().visuals;
+        let (fill, ink) = (visuals.selection.bg_fill, visuals.selection.stroke.color);
+        let busy = self.update_now;
+        let mut action = 0;
+        egui::TopBottomPanel::top("update_banner")
+            .frame(egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(16, 6)))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Roy Music {version} is available")).color(ink).bold());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(egui::Button::new(RichText::new("Later").color(ink)).frame(false)).on_hover_text("Hide until the next check").clicked() {
+                            action = 3;
+                        }
+                        let label = if pending.is_some() || staged.is_some() {
+                            "Restart and update"
+                        } else if busy {
+                            "Downloading…"
+                        } else {
+                            "Update now"
+                        };
+                        if ui.add_enabled(!busy, egui::Button::new(RichText::new(label).bold()).corner_radius(14)).clicked() {
+                            action = if pending.is_some() { 1 } else if staged.is_some() { 2 } else { 4 };
+                        }
+                    });
+                });
+            });
+        if busy {
+            ctx.request_repaint_after(std::time::Duration::from_millis(300));
+        }
+        match action {
+            1 => {
+                self.apply_pending_update();
+            }
+            2 => {
+                if let Some(path) = staged {
+                    self.launch_update(std::path::Path::new(&path));
+                }
+            }
+            3 => self.update_dismissed = true,
+            4 => {
+                self.update_now = true;
+                if !self.update_staging {
+                    self.update_staging = true;
+                    self.send("update-auto", "updates.stage", json!({}));
+                }
+            }
+            _ => {}
+        }
     }
     fn rows(&mut self, ui: &mut egui::Ui, mut tracks: Vec<Track>) {
         if matches!(self.page, Page::Library | Page::Favorites | Page::Offline) {
@@ -4750,6 +4857,7 @@ impl App {
             ctx.memory_mut(|m| m.request_focus(egui::Id::new("search-query")));
         }
         let mut anchor = None;
+        self.update_banner(ctx);
         egui::TopBottomPanel::top("search_bar")
             .frame(
                 egui::Frame::new()
@@ -5123,6 +5231,10 @@ impl App {
                 self.settings_query.clear();
                 self.settings_group = 0;
                 self.open_settings();
+                ui.close();
+            }
+            if self.nav_item(ui, "↑", "Check for updates", false).clicked() {
+                self.send("update", "updates.check", json!({}));
                 ui.close();
             }
             if self

@@ -1,3 +1,8 @@
+# Roy Music 0.3.4
+
+- Updates are easy to find: a green bar across the top of the window when a new version exists, with Update now.
+- New "Check for updates" entry in the ••• menu, and it tells you when you are up to date.
+
 # Roy Music 0.3.3
 
 - Quick icon for each friend, shared by both of you on every device: right-click the button beside the message box to change it.
