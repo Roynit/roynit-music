@@ -1,3 +1,7 @@
+# Roy Music 0.3.6
+
+- The mini player has a clear "Full player" button to go back to the full window, and Esc does the same.
+
 # Roy Music 0.3.5
 
 - Your profile shows real photos of your top artists instead of letters.

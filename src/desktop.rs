@@ -8087,6 +8087,9 @@ impl eframe::App for App {
             return;
         }
         if self.compact {
+            if escape && !ctx.wants_keyboard_input() {
+                Self::set_mini(ctx, &mut self.compact, false);
+            }
             // Mini player reuses the bar's parts so states and keyboard access match.
             let track = self.player["track_id"]
                 .as_str()
@@ -8109,10 +8112,10 @@ impl eframe::App for App {
                             track.as_ref(),
                             cover.as_deref(),
                             1.,
-                            width - 44.,
+                            width - 112.,
                             52.,
                         );
-                        if Self::icon_button(ui, "↗", "Back to full player", false).clicked() {
+                        if ui.button("Full player").on_hover_text("Back to the full window (Esc)").clicked() {
                             Self::set_mini(ctx, &mut self.compact, false);
                         }
                     });
