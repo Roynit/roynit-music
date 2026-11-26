@@ -1,3 +1,8 @@
+# Roy Music 0.3.1
+
+- Orbs shop and daily listening quests: earn Orbs by listening, spend them on avatar decorations, nameplates, profile frames and effects.
+- What friends wear shows on their avatar, rows and profile. Open the shop from the menu or your profile.
+
 # Roy Music 0.3.0
 
 - Friend profile cards show the friends you share, and since when you are friends.

@@ -21,3 +21,4 @@
 *.jks
 *.keystore
 /.wrangler/
+/assets/shop/_preview_*.png

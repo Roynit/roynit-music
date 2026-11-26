@@ -21,6 +21,8 @@ pub struct Person {
     pub banner_version: u64,
     /// Friends you have in common; only filled in for suggestions.
     pub mutual: u32,
+    /// What they wear from the shop: kind -> "item:variant".
+    pub equipped: HashMap<String, String>,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -100,6 +102,9 @@ enum Tag {
     Act(String),
     Taste(String),
     Person(String),
+    Shop,
+    Quests,
+    ShopAct,
 }
 
 type Reply = Result<Value, String>;
@@ -119,6 +124,12 @@ pub struct Social {
     pub unread: HashMap<String, u32>,
     /// Profile details (friends you share, join dates) by person id, fetched once when a profile card opens.
     pub people: HashMap<String, Value>,
+    /// The Orbs shop (balance, what you own and wear, prices) and today's quests, as the server last said.
+    pub shop: Option<Value>,
+    pub quests: Option<Value>,
+    pub shop_notice: Option<(String, bool)>,
+    /// Set when a buy or equip answered, so the app can update what the account wears.
+    pub equipped_changed: Option<Value>,
     people_asked: std::collections::HashSet<String>,
     /// The newest unread message of each friend, for the notification text.
     latest: HashMap<String, String>,
@@ -160,6 +171,10 @@ impl Social {
             taste: None,
             unread: HashMap::new(),
             people: HashMap::new(),
+            shop: None,
+            quests: None,
+            shop_notice: None,
+            equipped_changed: None,
             people_asked: Default::default(),
             latest: HashMap::new(),
             rung: HashMap::new(),
@@ -287,6 +302,16 @@ impl Social {
     /// Asks for what a friend loves most, so the app can blend it with your own music.
     pub fn fetch_taste(&mut self, id: &str, name: &str) {
         self.call(Tag::Taste(name.to_owned()), reqwest::Method::GET, format!("/friends/{id}/taste"), None);
+    }
+
+    pub fn refresh_shop(&mut self) {
+        self.call(Tag::Shop, reqwest::Method::GET, "/shop".into(), None);
+        self.call(Tag::Quests, reqwest::Method::GET, "/quests".into(), None);
+    }
+
+    /// A buy, an equip or a quest claim.
+    pub fn shop_act(&mut self, path: &str, body: Value) {
+        self.call(Tag::ShopAct, reqwest::Method::POST, path.into(), Some(body));
     }
 
     /// Fetches someone's profile details the first time their card is shown.
@@ -473,6 +498,25 @@ impl Social {
                 }
             }
             (Tag::Taste(_), Err(error)) => self.notice = Some((error, true)),
+            (Tag::Shop, Ok(data)) => {
+                self.equipped_changed = Some(data["equipped"].clone());
+                self.shop = Some(data);
+            }
+            (Tag::Quests, Ok(data)) => self.quests = Some(data),
+            (Tag::ShopAct, Ok(data)) => {
+                if data.get("quests").is_some() {
+                    // A claim answers with the quests; the balance changed too.
+                    if let (Some(shop), Some(orbs)) = (self.shop.as_mut(), data.get("orbs")) {
+                        shop["orbs"] = orbs.clone();
+                    }
+                    self.quests = Some(data);
+                } else {
+                    self.equipped_changed = Some(data["equipped"].clone());
+                    self.shop = Some(data);
+                }
+            }
+            (Tag::Shop | Tag::Quests, Err(_)) => {}
+            (Tag::ShopAct, Err(error)) => self.shop_notice = Some((error, true)),
             (Tag::Person(id), Ok(data)) => {
                 self.people.insert(id, data);
             }

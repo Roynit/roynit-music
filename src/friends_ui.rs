@@ -213,9 +213,11 @@ impl App {
             Color32::from_white_alpha((hover * 16.) as u8)
         };
         ui.painter().rect_filled(rect, 8., fill);
+        shop_ui::paint_plate(ui, rect, &person.equipped);
         let size = height - 16.;
         let art = egui::Rect::from_min_size(rect.left_top() + egui::vec2(8., 8.), egui::vec2(size, size));
         paint_person(ui, art, &person.display_name, self.social.avatar_uri(person), online, Color32::from_gray(0x1D));
+        shop_ui::paint_decoration(ui, art, &person.equipped);
         let text_left = art.right() + 10.;
         let width = (rect.right() - text_left - if badge > 0 { 34. } else { 8. }).max(20.);
         let mut text = ui.new_child(
@@ -322,6 +324,7 @@ impl App {
         ui.painter().rect_filled(rect, 10., Color32::from_white_alpha(if response.hovered() { 24 } else { 14 }));
         let art = egui::Rect::from_min_size(rect.left_top() + egui::vec2(8., 9.), egui::vec2(36., 36.));
         roy_account_ui::paint_avatar(ui, &self.roy_account, art);
+        shop_ui::paint_decoration(ui, art, &self.roy_account.equipped());
         let hidden = self.social.invisible;
         let at = art.right_bottom() - egui::vec2(5., 5.);
         ui.painter().circle_filled(at, 7.5, Color32::from_gray(0x2A));
@@ -452,10 +455,17 @@ impl App {
                         Color32::from_rgb(0x4F, 0xD1, 0xC5).gamma_multiply(0.25),
                         egui::Stroke::new(1.6_f32, Color32::from_rgb(0x4F, 0xD1, 0xC5)),
                     ));
-                    response.on_hover_text("Orbs will be spent in the Roy Music shop, coming later");
+                    if response.on_hover_text("Open the shop and daily quests").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        self.open_shop();
+                        ui.close();
+                    }
                 });
             ui.add_space(8.);
         });
+        let card = egui::Rect::from_min_max(banner.min, egui::pos2(banner.right(), ui.min_rect().bottom()));
+        let worn = self.roy_account.equipped();
+        shop_ui::paint_effect(ui, card, &worn);
+        shop_ui::paint_frame(ui, card, &worn, 40.);
     }
 
     /// Right panel while Friends is open: who is listening now, or the profile of the open chat.
@@ -586,6 +596,7 @@ impl App {
         let art = egui::Rect::from_min_size(banner.left_bottom() + egui::vec2(16., -36.), egui::vec2(76., 76.));
         ui.painter().circle_filled(art.center(), 42., ui.visuals().panel_fill);
         paint_person(ui, art, &person.display_name, self.social.avatar_uri(person), Some(friend.online), ui.visuals().panel_fill);
+        shop_ui::paint_decoration(ui, art, &person.equipped);
         ui.add_space(46.);
         egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 0)).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -669,6 +680,10 @@ impl App {
                 }
             });
         });
+        // What they wear on the whole card: an effect drifting over it, then the frame around it.
+        let card = egui::Rect::from_min_max(banner.min, egui::pos2(banner.right(), ui.min_rect().bottom()));
+        shop_ui::paint_effect(ui, card, &person.equipped);
+        shop_ui::paint_frame(ui, card, &person.equipped, 40.);
     }
 
     /// The main area of the Friends space: the lists, or the open conversation.

@@ -1,0 +1,982 @@
+{
+ "version": 1,
+ "avatar_fraction": 0.625,
+ "frame_edge": 0.28125,
+ "items": [
+  {
+   "id": "deco_kitty",
+   "kind": "decoration",
+   "name": "Kitty",
+   "tier": "epic",
+   "price": 1100,
+   "anim": "none",
+   "folder": "decorations",
+   "stem": "kitty",
+   "variants": [
+    {
+     "id": "gray",
+     "label": "Grey",
+     "color": "#b8bccc"
+    },
+    {
+     "id": "white",
+     "label": "Snow",
+     "color": "#ffffff"
+    },
+    {
+     "id": "ginger",
+     "label": "Ginger",
+     "color": "#f0a24a"
+    },
+    {
+     "id": "black",
+     "label": "Shadow",
+     "color": "#8a7aa8"
+    }
+   ],
+   "particles": {
+    "sprites": [
+     "star"
+    ],
+    "count": 8,
+    "size": [
+     0.02,
+     0.04
+    ],
+    "twinkle": [
+     1.6,
+     3.2
+    ],
+    "blend": "add",
+    "tint": true
+   },
+   "layers": [
+    {
+     "x": [
+      0,
+      1
+     ],
+     "y": [
+      0,
+      0.5
+     ],
+     "rotate": 1.5,
+     "period": 3.6,
+     "phase": 0.0,
+     "pivot": [
+      0.5,
+      0.5
+     ],
+     "bob": 0.0,
+     "bob_period": 2.6,
+     "sign": 1
+    },
+    {
+     "x": [
+      0,
+      1
+     ],
+     "y": [
+      0.5,
+      1
+     ],
+     "rotate": 0.0,
+     "period": 3.0,
+     "phase": 0.0,
+     "pivot": [
+      0.5,
+      0.5
+     ],
+     "bob": 0.012,
+     "bob_period": 2.4,
+     "sign": 1
+    }
+   ]
+  },
+  {
+   "id": "deco_night",
+   "kind": "decoration",
+   "name": "Night Sky",
+   "tier": "epic",
+   "price": 1100,
+   "anim": "float",
+   "folder": "decorations",
+   "stem": "night",
+   "variants": [
+    {
+     "id": "gold",
+     "label": "Gold",
+     "color": "#ffd86b"
+    },
+    {
+     "id": "aqua",
+     "label": "Aqua",
+     "color": "#8fe0ff"
+    },
+    {
+     "id": "rose",
+     "label": "Rose",
+     "color": "#ffa8d0"
+    }
+   ],
+   "particles": {
+    "sprites": [
+     "star"
+    ],
+    "count": 22,
+    "size": [
+     0.02,
+     0.06
+    ],
+    "twinkle": [
+     1.2,
+     3.0
+    ],
+    "blend": "add",
+    "tint": true
+   }
+  },
+  {
+   "id": "deco_moon",
+   "kind": "decoration",
+   "name": "Crescent",
+   "tier": "epic",
+   "price": 1100,
+   "anim": "pulse",
+   "folder": "decorations",
+   "stem": "moon",
+   "variants": [
+    {
+     "id": "pink",
+     "label": "Pink",
+     "color": "#ffc2dd"
+    },
+    {
+     "id": "blue",
+     "label": "Blue",
+     "color": "#a8dcff"
+    },
+    {
+     "id": "mint",
+     "label": "Mint",
+     "color": "#b8ffd8"
+    }
+   ],
+   "particles": {
+    "sprites": [
+     "star"
+    ],
+    "count": 20,
+    "size": [
+     0.02,
+     0.055
+    ],
+    "twinkle": [
+     1.4,
+     3.4
+    ],
+    "blend": "add",
+    "tint": true
+   }
+  },
+  {
+   "id": "deco_blossom",
+   "kind": "decoration",
+   "name": "Blossom",
+   "tier": "epic",
+   "price": 1200,
+   "anim": "float",
+   "folder": "decorations",
+   "stem": "blossom",
+   "variants": [
+    {
+     "id": "pink",
+     "label": "Pink",
+     "color": "#ffb3cf"
+    },
+    {
+     "id": "plum",
+     "label": "Plum",
+     "color": "#e0508a"
+    },
+    {
+     "id": "cream",
+     "label": "Cream",
+     "color": "#fff3d0"
+    }
+   ],
+   "particles": {
+    "sprites": [
+     "petal"
+    ],
+    "count": 14,
+    "size": [
+     0.03,
+     0.06
+    ],
+    "rise": -0.3,
+    "speed": 0.14,
+    "blend": "normal",
+    "tint": false
+   }
+  },
+  {
+   "id": "deco_seraph",
+   "kind": "decoration",
+   "name": "Seraph",
+   "tier": "epic",
+   "price": 1300,
+   "anim": "none",
+   "folder": "decorations",
+   "stem": "seraph",
+   "variants": [
+    {
+     "id": "white",
+     "label": "Angel",
+     "color": "#e8f0ff"
+    },
+    {
+     "id": "rose",
+     "label": "Rose",
+     "color": "#e0a8ff"
+    },
+    {
+     "id": "gold",
+     "label": "Gold",
+     "color": "#ffd98a"
+    }
+   ],
+   "particles": {
+    "sprites": [
+     "star"
+    ],
+    "count": 10,
+    "size": [
+     0.02,
+     0.045
+    ],
+    "twinkle": [
+     1.6,
+     3.4
+    ],
+    "blend": "add",
+    "tint": true
+   },
+   "layers": [
+    {
+     "x": [
+      0,
+      0.5
+     ],
+     "y": [
+      0,
+      1
+     ],
+     "rotate": 3.6,
+     "period": 2.8,
+     "phase": 0.0,
+     "pivot": [
+      0.4,
+      0.52
+     ],
+     "bob": 0.008,
+     "bob_period": 2.6,
+     "sign": 1
+    },
+    {
+     "x": [
+      0.5,
+      1
+     ],
+     "y": [
+      0,
+      1
+     ],
+     "rotate": 3.6,
+     "period": 2.8,
+     "phase": 0.0,
+     "pivot": [
+      0.6,
+      0.52
+     ],
+     "bob": 0.008,
+     "bob_period": 2.6,
+     "sign": -1
+    }
+   ],
+   "fraction": 0.525
+  },
+  {
+   "id": "deco_eclipse",
+   "kind": "decoration",
+   "name": "Eclipse",
+   "tier": "epic",
+   "price": 1300,
+   "anim": "pulse",
+   "folder": "decorations",
+   "stem": "eclipse",
+   "variants": [
+    {
+     "id": "ember",
+     "label": "Ember",
+     "color": "#ff9a3a"
+    },
+    {
+     "id": "violet",
+     "label": "Violet",
+     "color": "#b48cff"
+    },
+    {
+     "id": "ice",
+     "label": "Ice",
+     "color": "#7fd8ff"
+    }
+   ],
+   "particles": {
+    "sprites": [
+     "glow"
+    ],
+    "count": 22,
+    "size": [
+     0.02,
+     0.05
+    ],
+    "rise": 0.24,
+    "speed": 0.22,
+    "blend": "add",
+    "tint": true
+   }
+  },
+  {
+   "id": "deco_planet",
+   "kind": "decoration",
+   "name": "Planet",
+   "tier": "epic",
+   "price": 1200,
+   "anim": "float",
+   "folder": "decorations",
+   "stem": "planet",
+   "variants": [
+    {
+     "id": "pink",
+     "label": "Pink",
+     "color": "#ffe08a"
+    },
+    {
+     "id": "blue",
+     "label": "Blue",
+     "color": "#a8dcff"
+    },
+    {
+     "id": "mint",
+     "label": "Mint",
+     "color": "#b8ffd8"
+    }
+   ],
+   "particles": {
+    "sprites": [
+     "star"
+    ],
+    "count": 24,
+    "size": [
+     0.02,
+     0.055
+    ],
+    "twinkle": [
+     1.2,
+     3.2
+    ],
+    "blend": "add",
+    "tint": true
+   }
+  },
+  {
+   "id": "deco_fury",
+   "kind": "decoration",
+   "name": "Fury",
+   "tier": "rare",
+   "price": 1000,
+   "anim": "pulse",
+   "folder": "decorations",
+   "stem": "fury",
+   "variants": [
+    {
+     "id": "red",
+     "label": "Red",
+     "color": "#ff6a5a"
+    },
+    {
+     "id": "blue",
+     "label": "Blue",
+     "color": "#6aa8ff"
+    },
+    {
+     "id": "violet",
+     "label": "Violet",
+     "color": "#c28cff"
+    }
+   ],
+   "particles": {
+    "sprites": [
+     "star"
+    ],
+    "count": 14,
+    "size": [
+     0.02,
+     0.05
+    ],
+    "twinkle": [
+     2.0,
+     4.0
+    ],
+    "blend": "add",
+    "tint": true
+   }
+  },
+  {
+   "id": "deco_splash",
+   "kind": "decoration",
+   "name": "Splash",
+   "tier": "rare",
+   "price": 1000,
+   "anim": "float",
+   "folder": "decorations",
+   "stem": "splash",
+   "variants": [
+    {
+     "id": "aqua",
+     "label": "Aqua",
+     "color": "#8fe0ff"
+    },
+    {
+     "id": "rose",
+     "label": "Rose",
+     "color": "#ffa8d0"
+    },
+    {
+     "id": "lime",
+     "label": "Lime",
+     "color": "#c8ff9a"
+    }
+   ],
+   "particles": {
+    "sprites": [
+     "flake"
+    ],
+    "count": 22,
+    "size": [
+     0.015,
+     0.04
+    ],
+    "rise": 0.22,
+    "speed": 0.16,
+    "blend": "normal",
+    "tint": true
+   }
+  },
+  {
+   "id": "plate_soundwave",
+   "kind": "nameplate",
+   "name": "Soundwave",
+   "tier": "common",
+   "price": 400,
+   "folder": "nameplates",
+   "stem": "soundwave",
+   "variants": [
+    {
+     "id": "neon",
+     "label": "Neon",
+     "color": "#2de2ff"
+    },
+    {
+     "id": "lime",
+     "label": "Lime",
+     "color": "#b6ff3d"
+    },
+    {
+     "id": "gold",
+     "label": "Gold",
+     "color": "#ffd86b"
+    }
+   ]
+  },
+  {
+   "id": "plate_grooves",
+   "kind": "nameplate",
+   "name": "Record Grooves",
+   "tier": "common",
+   "price": 450,
+   "folder": "nameplates",
+   "stem": "grooves",
+   "variants": [
+    {
+     "id": "red",
+     "label": "Red",
+     "color": "#d92b2b"
+    },
+    {
+     "id": "teal",
+     "label": "Teal",
+     "color": "#17b8a6"
+    },
+    {
+     "id": "gold",
+     "label": "Gold",
+     "color": "#e0a82e"
+    }
+   ]
+  },
+  {
+   "id": "plate_starfield",
+   "kind": "nameplate",
+   "name": "Starfield",
+   "tier": "rare",
+   "price": 600,
+   "folder": "nameplates",
+   "stem": "starfield",
+   "variants": [
+    {
+     "id": "violet",
+     "label": "Violet",
+     "color": "#7a3dff"
+    },
+    {
+     "id": "blue",
+     "label": "Blue",
+     "color": "#2d7dff"
+    },
+    {
+     "id": "emerald",
+     "label": "Emerald",
+     "color": "#1ed78a"
+    }
+   ]
+  },
+  {
+   "id": "plate_sunset",
+   "kind": "nameplate",
+   "name": "Sunset Drive",
+   "tier": "rare",
+   "price": 650,
+   "folder": "nameplates",
+   "stem": "sunset",
+   "variants": [
+    {
+     "id": "miami",
+     "label": "Miami",
+     "color": "#d9358f"
+    },
+    {
+     "id": "dusk",
+     "label": "Dusk",
+     "color": "#6a3dd9"
+    },
+    {
+     "id": "tangerine",
+     "label": "Tangerine",
+     "color": "#d9602d"
+    }
+   ]
+  },
+  {
+   "id": "plate_sakura",
+   "kind": "nameplate",
+   "name": "Sakura Breeze",
+   "tier": "rare",
+   "price": 650,
+   "folder": "nameplates",
+   "stem": "sakura",
+   "variants": [
+    {
+     "id": "pink",
+     "label": "Pink",
+     "color": "#ffc2d9"
+    },
+    {
+     "id": "white",
+     "label": "White",
+     "color": "#ffffff"
+    },
+    {
+     "id": "lilac",
+     "label": "Lilac",
+     "color": "#e6ccff"
+    }
+   ]
+  },
+  {
+   "id": "plate_circuit",
+   "kind": "nameplate",
+   "name": "Circuit",
+   "tier": "epic",
+   "price": 800,
+   "folder": "nameplates",
+   "stem": "circuit",
+   "variants": [
+    {
+     "id": "green",
+     "label": "Green",
+     "color": "#1ed760"
+    },
+    {
+     "id": "amber",
+     "label": "Amber",
+     "color": "#ffb03d"
+    },
+    {
+     "id": "cyan",
+     "label": "Cyan",
+     "color": "#3de0ff"
+    }
+   ]
+  },
+  {
+   "id": "frame_gold",
+   "kind": "frame",
+   "name": "Gilded",
+   "tier": "rare",
+   "price": 800,
+   "folder": "frames",
+   "stem": "gold",
+   "variants": [
+    {
+     "id": "gold",
+     "label": "Gold",
+     "color": "#ffcf4a"
+    },
+    {
+     "id": "rose",
+     "label": "Rose gold",
+     "color": "#f2a38a"
+    },
+    {
+     "id": "silver",
+     "label": "Silver",
+     "color": "#b9c2d6"
+    }
+   ]
+  },
+  {
+   "id": "frame_neon",
+   "kind": "frame",
+   "name": "Neon Edge",
+   "tier": "common",
+   "price": 600,
+   "folder": "frames",
+   "stem": "neon",
+   "variants": [
+    {
+     "id": "cyan",
+     "label": "Cyan",
+     "color": "#2de2ff"
+    },
+    {
+     "id": "lime",
+     "label": "Lime",
+     "color": "#a6ff3d"
+    },
+    {
+     "id": "sun",
+     "label": "Sun",
+     "color": "#ffb03d"
+    }
+   ]
+  },
+  {
+   "id": "frame_ice",
+   "kind": "frame",
+   "name": "Frost",
+   "tier": "epic",
+   "price": 900,
+   "folder": "frames",
+   "stem": "ice",
+   "variants": [
+    {
+     "id": "blue",
+     "label": "Blue",
+     "color": "#7fd0ff"
+    },
+    {
+     "id": "mint",
+     "label": "Mint",
+     "color": "#7dffd0"
+    },
+    {
+     "id": "lilac",
+     "label": "Lilac",
+     "color": "#b79bff"
+    }
+   ]
+  },
+  {
+   "id": "frame_pixel",
+   "kind": "frame",
+   "name": "Arcade",
+   "tier": "common",
+   "price": 600,
+   "folder": "frames",
+   "stem": "pixel",
+   "variants": [
+    {
+     "id": "green",
+     "label": "Green",
+     "color": "#36d66b"
+    },
+    {
+     "id": "red",
+     "label": "Red",
+     "color": "#ff4d5e"
+    },
+    {
+     "id": "blue",
+     "label": "Blue",
+     "color": "#4d7dff"
+    }
+   ]
+  },
+  {
+   "id": "fx_sakura",
+   "kind": "effect",
+   "name": "Sakura Fall",
+   "tier": "epic",
+   "price": 1100,
+   "sprites": [
+    "petal"
+   ],
+   "emitter": {
+    "count": 16,
+    "size": [
+     0.05,
+     0.095
+    ],
+    "vy": [
+     0.07,
+     0.16
+    ],
+    "sway": [
+     0.02,
+     0.05
+    ],
+    "spin": [
+     -1.4,
+     1.4
+    ],
+    "start": "top",
+    "fade": 0.12,
+    "blend": "normal",
+    "tint": false
+   },
+   "variants": [
+    {
+     "id": "pink",
+     "label": "Pink",
+     "color": "#ffffff"
+    },
+    {
+     "id": "white",
+     "label": "White",
+     "color": "#fff2f8"
+    }
+   ]
+  },
+  {
+   "id": "fx_notes",
+   "kind": "effect",
+   "name": "Rising Notes",
+   "tier": "rare",
+   "price": 900,
+   "sprites": [
+    "note"
+   ],
+   "emitter": {
+    "count": 12,
+    "size": [
+     0.04,
+     0.075
+    ],
+    "vy": [
+     -0.16,
+     -0.07
+    ],
+    "sway": [
+     0.015,
+     0.04
+    ],
+    "spin": [
+     -0.5,
+     0.5
+    ],
+    "start": "bottom",
+    "fade": 0.2,
+    "blend": "normal",
+    "tint": true
+   },
+   "variants": [
+    {
+     "id": "neon",
+     "label": "Neon",
+     "color": "#52e8ff"
+    },
+    {
+     "id": "pink",
+     "label": "Pink",
+     "color": "#ff6cc0"
+    },
+    {
+     "id": "green",
+     "label": "Green",
+     "color": "#4cf08a"
+    }
+   ]
+  },
+  {
+   "id": "fx_stars",
+   "kind": "effect",
+   "name": "Twinkle",
+   "tier": "rare",
+   "price": 900,
+   "sprites": [
+    "star"
+   ],
+   "emitter": {
+    "count": 18,
+    "size": [
+     0.025,
+     0.07
+    ],
+    "vy": [
+     0.0,
+     0.0
+    ],
+    "sway": [
+     0.0,
+     0.004
+    ],
+    "spin": [
+     0,
+     0
+    ],
+    "start": "anywhere",
+    "fade": 0.5,
+    "blend": "add",
+    "tint": true,
+    "twinkle": [
+     1.2,
+     3.0
+    ]
+   },
+   "variants": [
+    {
+     "id": "gold",
+     "label": "Gold",
+     "color": "#ffe08a"
+    },
+    {
+     "id": "ice",
+     "label": "Ice",
+     "color": "#a8dcff"
+    },
+    {
+     "id": "rose",
+     "label": "Rose",
+     "color": "#ffb0d8"
+    }
+   ]
+  },
+  {
+   "id": "fx_embers",
+   "kind": "effect",
+   "name": "Embers",
+   "tier": "epic",
+   "price": 1200,
+   "sprites": [
+    "glow"
+   ],
+   "emitter": {
+    "count": 24,
+    "size": [
+     0.025,
+     0.06
+    ],
+    "vy": [
+     -0.14,
+     -0.06
+    ],
+    "sway": [
+     0.01,
+     0.03
+    ],
+    "spin": [
+     0,
+     0
+    ],
+    "start": "bottom",
+    "fade": 0.25,
+    "blend": "add",
+    "tint": true
+   },
+   "variants": [
+    {
+     "id": "fire",
+     "label": "Fire",
+     "color": "#ff8a3d"
+    },
+    {
+     "id": "plasma",
+     "label": "Plasma",
+     "color": "#b06cff"
+    },
+    {
+     "id": "mint",
+     "label": "Mint",
+     "color": "#3dffb0"
+    }
+   ]
+  },
+  {
+   "id": "fx_snow",
+   "kind": "effect",
+   "name": "Snowfall",
+   "tier": "common",
+   "price": 700,
+   "sprites": [
+    "flake"
+   ],
+   "emitter": {
+    "count": 26,
+    "size": [
+     0.014,
+     0.036
+    ],
+    "vy": [
+     0.05,
+     0.11
+    ],
+    "sway": [
+     0.01,
+     0.03
+    ],
+    "spin": [
+     0,
+     0
+    ],
+    "start": "top",
+    "fade": 0.1,
+    "blend": "normal",
+    "tint": true
+   },
+   "variants": [
+    {
+     "id": "white",
+     "label": "White",
+     "color": "#ffffff"
+    },
+    {
+     "id": "blue",
+     "label": "Blue",
+     "color": "#cfe8ff"
+    }
+   ]
+  }
+ ]
+}

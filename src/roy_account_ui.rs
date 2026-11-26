@@ -342,6 +342,16 @@ impl State {
         self.profile["bio"].as_str().unwrap_or_default()
     }
 
+    pub(super) fn equipped(&self) -> std::collections::HashMap<String, String> {
+        super::shop_ui::equipped_of(&self.profile["equipped"])
+    }
+
+    pub(super) fn set_equipped(&mut self, equipped: Value) {
+        if equipped.is_object() {
+            self.profile["equipped"] = equipped;
+        }
+    }
+
     pub(super) fn orbs(&self) -> u64 {
         self.profile["orbs"].as_u64().unwrap_or(0)
     }

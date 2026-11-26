@@ -1,6 +1,7 @@
 import { scrypt, timingSafeEqual } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { connect } from "cloudflare:sockets";
+import { credit, questState, claim, shopState, buy, equip, equippedOf } from "./shop.mjs";
 
 const encoder = new TextEncoder();
 const DAY = 86_400;
@@ -9,10 +10,10 @@ const now = () => Math.floor(Date.now() / 1000);
 const hex = (bytes) => Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
 const random = () => hex(crypto.getRandomValues(new Uint8Array(32)));
 const digest = async (text) => hex(await crypto.subtle.digest("SHA-256", encoder.encode(text)));
-const publicUser = ({id, email, username, display_name, google_subject, password, orbs, share_taste, email_verified, bio, birthday, avatar_set, avatar_version, banner_set, banner_version, created_at}, base) => ({
+const publicUser = ({id, email, username, display_name, google_subject, password, orbs, share_taste, email_verified, bio, birthday, equipped, avatar_set, avatar_version, banner_set, banner_version, created_at}, base) => ({
   id, email, username, display_name, provider: google_subject ? "google" : "password",
   has_password: !!password, has_google: !!google_subject, orbs: orbs || 0, share_taste: share_taste !== 0, email_verified: !!email_verified,
-  bio: bio || "", birthday: birthday || "", created_at,
+  bio: bio || "", birthday: birthday || "", equipped: equippedOf(equipped), created_at,
   // The version in the URL changes with every upload, so browsers and the app can cache it forever.
   avatar_url: avatar_set ? base + "/avatar/" + id + "?v=" + avatar_version : null,
   banner_url: banner_set ? base + "/banner/" + id + "?v=" + banner_version : null,
@@ -537,7 +538,8 @@ const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 const ONLINE_FOR = 75;
 const pairOf = (a, b) => a < b ? [a, b] : [b, a];
 const person = (row) => ({id:row.id, username:row.username, display_name:row.display_name, bio:row.bio || "",
-  avatar_version:row.avatar_set ? row.avatar_version : 0, banner_version:row.banner_set ? row.banner_version : 0});
+  avatar_version:row.avatar_set ? row.avatar_version : 0, banner_version:row.banner_set ? row.banner_version : 0,
+  equipped:equippedOf(row.equipped)});
 async function friendship(env, me, other) {
   const [low, high] = pairOf(me, other);
   return env.DB.prepare("SELECT * FROM friendships WHERE low=? AND high=?").bind(low, high).first();
@@ -550,7 +552,7 @@ async function requireFriend(env, me, other) {
 async function socialSnapshot(env, user) {
   const stamp = now();
   const {results} = await env.DB.prepare(
-    "SELECT f.status,f.requester,u.id,u.username,u.display_name,u.bio,u.avatar_set,u.avatar_version,u.banner_set,u.banner_version,p.seen_at,p.invisible,p.listening "
+    "SELECT f.status,f.requester,u.id,u.username,u.display_name,u.bio,u.equipped,u.avatar_set,u.avatar_version,u.banner_set,u.banner_version,p.seen_at,p.invisible,p.listening "
     + "FROM friendships f JOIN users u ON u.id=CASE WHEN f.low=?1 THEN f.high ELSE f.low END "
     + "LEFT JOIN presence p ON p.user_id=u.id WHERE f.low=?1 OR f.high=?1 ORDER BY f.created_at DESC"
   ).bind(user.id).all();
@@ -585,6 +587,8 @@ function listeningState(input) {
     cover:/^https:\/\//i.test(str(input.cover)) ? input.cover.slice(0, 2048) : null,
     duration:number(input.duration, 86_400), position:number(input.position, 86_400), playing:input.playing === true, at:now()};
 }
+// The smoke tests run with TEST_CLOCK=1 (git-ignored .dev.vars) so they can move time forward and top up Orbs; production has neither.
+const stamp = (request, env) => env.TEST_CLOCK === "1" && /^\d{9,11}$/.test(request.headers.get("x-test-now") || "") ? Number(request.headers.get("x-test-now")) : now();
 async function socialRoute(request, env, user, path, url) {
   if (path === "/social" && request.method === "GET") return reply(await socialSnapshot(env, user));
   if (path === "/presence" && request.method === "PUT") {
@@ -593,7 +597,29 @@ async function socialRoute(request, env, user, path, url) {
     const listening = listeningState(body.listening);
     await env.DB.prepare("INSERT INTO presence(user_id,invisible,seen_at,listening) VALUES (?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET invisible=excluded.invisible,seen_at=excluded.seen_at,listening=excluded.listening")
       .bind(user.id, body.invisible === true ? 1 : 0, now(), listening && JSON.stringify(listening)).run();
+    // Listening time for the daily quests is counted here, from what the server sees. A failure never breaks presence.
+    try { await credit(env, user.id, listening, stamp(request, env)); } catch (error) { console.error("Quest credit failed", error?.name); }
     return reply({ok:true});
+  }
+  if (path === "/quests" && request.method === "GET") return reply(await questState(env, user.id, stamp(request, env)));
+  if (path === "/quests/claim" && request.method === "POST") {
+    await rate(env, request, "claim", 60, user.id);
+    return reply(await claim(env, user.id, str((await json(request)).id), stamp(request, env), HttpError));
+  }
+  if (path === "/shop/test-grant" && request.method === "POST" && env.TEST_CLOCK === "1") {
+    await env.DB.prepare("UPDATE users SET orbs=orbs+? WHERE id=?").bind(Number((await json(request)).orbs) || 0, user.id).run();
+    return reply(await shopState(env, user.id));
+  }
+  if (path === "/shop" && request.method === "GET") return reply(await shopState(env, user.id));
+  if (path === "/shop/buy" && request.method === "POST") {
+    await rate(env, request, "buy", 60, user.id);
+    const body = await json(request);
+    return reply(await buy(env, user.id, str(body.item), str(body.variant), now(), HttpError));
+  }
+  if (path === "/me/equip" && request.method === "POST") {
+    await rate(env, request, "equip", 120, user.id);
+    const body = await json(request);
+    return reply(await equip(env, user.id, str(body.kind), body.item === null ? null : str(body.item), str(body.variant), HttpError));
   }
   if (path === "/friends/request" && request.method === "POST") {
     await rate(env, request, "friend", 20, user.id);
@@ -642,7 +668,7 @@ async function socialRoute(request, env, user, path, url) {
     const {results} = await env.DB.prepare(
       "WITH mine AS (SELECT CASE WHEN low=?1 THEN high ELSE low END AS id FROM friendships WHERE (low=?1 OR high=?1) AND status='accepted'), "
       + "related AS (SELECT CASE WHEN low=?1 THEN high ELSE low END AS id FROM friendships WHERE low=?1 OR high=?1) "
-      + "SELECT u.id,u.username,u.display_name,u.bio,u.avatar_set,u.avatar_version,u.banner_set,u.banner_version,COUNT(*) AS mutual "
+      + "SELECT u.id,u.username,u.display_name,u.bio,u.equipped,u.avatar_set,u.avatar_version,u.banner_set,u.banner_version,COUNT(*) AS mutual "
       + "FROM friendships f JOIN users u ON u.id=CASE WHEN f.low IN (SELECT id FROM mine) THEN f.high ELSE f.low END "
       + "WHERE f.status='accepted' AND (f.low IN (SELECT id FROM mine) OR f.high IN (SELECT id FROM mine)) "
       + "AND u.id!=?1 AND u.id NOT IN (SELECT id FROM related) GROUP BY u.id ORDER BY mutual DESC,u.display_name LIMIT 12"
@@ -654,12 +680,12 @@ async function socialRoute(request, env, user, path, url) {
     // Someone's profile card: friends, people with a pending request, and friends of your friends. Shows the friends you share.
     await rate(env, request, "profile", 120, user.id);
     const other = profile[1];
-    const row = await env.DB.prepare("SELECT id,username,display_name,bio,avatar_set,avatar_version,banner_set,banner_version,created_at FROM users WHERE id=?").bind(other).first();
+    const row = await env.DB.prepare("SELECT id,username,display_name,bio,equipped,avatar_set,avatar_version,banner_set,banner_version,created_at FROM users WHERE id=?").bind(other).first();
     if (!row) throw new HttpError(404, "Not found.");
     const link = await friendship(env, user.id, other);
     const mine = "SELECT CASE WHEN low=?1 THEN high ELSE low END AS id FROM friendships WHERE (low=?1 OR high=?1) AND status='accepted'";
     const shared = (await env.DB.prepare(
-      "SELECT u.id,u.username,u.display_name,u.bio,u.avatar_set,u.avatar_version,u.banner_set,u.banner_version FROM users u "
+      "SELECT u.id,u.username,u.display_name,u.bio,u.equipped,u.avatar_set,u.avatar_version,u.banner_set,u.banner_version FROM users u "
       + "WHERE u.id IN (" + mine + ") AND u.id IN (" + mine.replaceAll("?1", "?2") + ") ORDER BY u.display_name LIMIT 30"
     ).bind(user.id, other).all()).results;
     if (other !== user.id && !link && !shared.length) throw new HttpError(403, "You can only open the profile of people you know.");

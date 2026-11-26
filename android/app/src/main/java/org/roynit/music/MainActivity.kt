@@ -176,7 +176,7 @@ class MainActivity : Activity(), SongHost {
         detail = DetailView(this, this)
         // Inside the page area, so the player bar and the tabs stay in reach while a page is open.
         frame.addView(detail, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        drawer = DrawerView(this, { select(it) }, { select(2); library.showRecents() })
+        drawer = DrawerView(this, { select(it) }, { select(2); library.showRecents() }, { select(3); friends.openShop() })
         root.addView(drawer, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         cropper = CropView(this) { bitmap -> cropDone?.invoke(bitmap); cropDone = null }
         root.addView(cropper, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))

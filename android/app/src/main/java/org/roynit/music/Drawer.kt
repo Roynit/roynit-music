@@ -14,7 +14,7 @@ import android.widget.Toast
  * The menu that slides in from the left when you tap your picture, like Spotify's: your profile, listening stats,
  * what you played lately, updates, and settings. Moving it is a translation only, so it costs the CPU nothing.
  */
-class DrawerView(private val activity: Activity, private val go: (Int) -> Unit, private val recents: () -> Unit) : FrameLayout(activity) {
+class DrawerView(private val activity: Activity, private val go: (Int) -> Unit, private val recents: () -> Unit, private val shop: () -> Unit) : FrameLayout(activity) {
     private val scrim = View(activity).apply { setBackgroundColor(0xAA000000.toInt()); alpha = 0f; setOnClickListener { close() } }
     private val panel = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
@@ -64,6 +64,7 @@ class DrawerView(private val activity: Activity, private val go: (Int) -> Unit, 
             setOnClickListener { close(); go(3) }
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = activity.dp(8) })
         panel.addView(row(R.drawable.ic_add, "Add account") { go(3) })
+        panel.addView(row(R.drawable.ic_grid, "Orbs shop and quests") { shop() })
         panel.addView(row(R.drawable.ic_stats, "Listening stats") { stats() })
         panel.addView(row(R.drawable.ic_recent, "Recents") { recents() })
         panel.addView(row(R.drawable.ic_megaphone, "What's new") { updates() })

@@ -4,6 +4,8 @@ mod crop_ui;
 mod friends_ui;
 mod import_ui;
 mod notify;
+mod shop_assets;
+mod shop_ui;
 mod reorder_ui;
 mod roy_account_ui;
 mod stats_ui;
@@ -204,6 +206,9 @@ struct App {
     data_root: PathBuf,
     import_url: String,
     stats_open: bool,
+    shop_open: bool,
+    shop_tab: String,
+    shop_choice: HashMap<String, usize>,
     greeted_day: String,
     greeted_birthday: i32,
     birthday_dialog: Option<i32>,
@@ -492,6 +497,9 @@ impl App {
             data_root,
             import_url: String::new(),
             stats_open: false,
+            shop_open: false,
+            shop_tab: "quests".into(),
+            shop_choice: HashMap::new(),
             greeted_day: String::new(),
             greeted_birthday: 0,
             birthday_dialog: None,
@@ -5122,6 +5130,10 @@ impl App {
                 self.open_import();
                 ui.close();
             }
+            if self.nav_item(ui, "◆", "Orbs shop and quests", self.shop_open).clicked() {
+                self.open_shop();
+                ui.close();
+            }
             if self.nav_item(ui, "📈", "Listening stats", self.stats_open).clicked() {
                 self.stats_open = true;
                 ui.close();
@@ -7879,6 +7891,7 @@ impl eframe::App for App {
             self.settings_dialog(ctx);
             self.import_dialog(ctx);
             self.stats_dialog(ctx);
+            self.shop_dialog(ctx);
             self.birthday_dialog(ctx);
         }
         if let Some((message, failed)) = self.roy_account.take_link_notice() {

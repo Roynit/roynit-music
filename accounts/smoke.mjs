@@ -5,8 +5,8 @@ import test from "node:test";
 const base = "http://127.0.0.1:8790/api/account";
 // A Google account can belong to one Roynit ID only, so every run of this file uses a fresh one.
 const runId = crypto.randomUUID();
-async function request(path, method = "GET", body, token, expected = 200) {
-  const headers = {};
+async function request(path, method = "GET", body, token, expected = 200, extra = {}) {
+  const headers = { ...extra };
   if (body !== undefined) headers["content-type"] = "application/json";
   if (token) headers.authorization = "Bearer " + token;
   const response = await fetch(base + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -397,4 +397,73 @@ test("email verification at sign-up", async () => {
   // Now a reset code is mailed.
   await request("/password/forgot", "POST", { login: fixed });
   assert.match(await mailTo(fixed), /reset code/);
+});
+
+test("daily quests: the server counts the listening, each quest pays once, and fakes earn nothing", async () => {
+  const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
+  const password = "local-" + crypto.randomUUID();
+  const a = await request("/register", "POST", { email: "qa" + nonce + "@example.test", username: "qa_" + nonce, password });
+  const at = (t) => ({ "x-test-now": String(t) });
+  const DAY = 1_900_000_000 - (1_900_000_000 % 86400) - 7 * 3600 + 86400 * 3; // 00:00 in Vietnam, a few days out
+  const beat = (t, song, position) => request("/presence", "PUT", { listening: { title: "Song " + song, artist: "Artist " + song, duration: 240, position, playing: true } }, a.token, 200, at(t));
+  const quests = () => request("/quests", "GET", undefined, a.token, 200, at(DAY + 3600));
+  let state = await quests();
+  assert.equal(state.quests.length, 3);
+  assert.deepEqual(state.quests.map((q) => q.tier), ["easy", "medium", "hard"]);
+  assert.ok(state.quests.every((q) => q.progress === 0 && !q.claimed));
+  await request("/quests/claim", "POST", { id: state.quests[0].id }, a.token, 409, at(DAY + 3600));
+  await request("/quests/claim", "POST", { id: "nonsense" }, a.token, 404, at(DAY + 3600));
+
+  // Heartbeats that do not move the song along earn nothing, and neither does a long silence between two.
+  let t = DAY + 3600;
+  await beat(t, 1, 10);
+  await beat(t + 30, 1, 10);       // 30 s passed but the song did not move
+  await beat(t + 400, 1, 440);     // far too long a gap
+  state = await quests();
+  assert.ok(state.quests.every((q) => q.progress === 0), JSON.stringify(state.quests));
+
+  // Honest listening: new songs, moving positions, 40 s apart.
+  t += 1000;
+  for (let song = 0; song < 20; song++) for (let k = 0; k < 4; k++) { t += 40; await beat(t, song, 5 + k * 40); }
+  state = await quests();
+  const easy = state.quests[0];
+  assert.ok(easy.done, JSON.stringify(state.quests));
+  const before = state.orbs;
+  const paid = await request("/quests/claim", "POST", { id: easy.id }, a.token, 200, at(DAY + 3600));
+  assert.equal(paid.orbs, before + easy.orbs);
+  assert.ok(paid.quests[0].claimed);
+  await request("/quests/claim", "POST", { id: easy.id }, a.token, 409, at(DAY + 3600));
+  // The next day starts clean.
+  const next = await request("/quests", "GET", undefined, a.token, 200, at(DAY + 86400 + 60));
+  assert.ok(next.quests.every((q) => q.progress === 0 && !q.claimed));
+});
+
+test("shop: buy once, wear what you own, friends see it", async () => {
+  const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
+  const password = "local-" + crypto.randomUUID();
+  const make = (tag) => request("/register", "POST", { email: tag + nonce + "@example.test", username: tag + "_" + nonce, password });
+  const [a, b] = [await make("ha"), await make("hb")];
+  await request("/friends/request", "POST", { username: b.account.username }, a.token);
+  await request("/friends/accept", "POST", { id: a.account.id }, b.token);
+  let shop = await request("/shop", "GET", undefined, a.token);
+  assert.equal(shop.orbs, 0);
+  assert.ok(shop.items.length >= 20);
+  const deco = shop.items.find((i) => i.kind === "decoration");
+  await request("/shop/buy", "POST", { item: deco.id, variant: deco.variants[0] }, a.token, 409);      // no Orbs yet
+  await request("/shop/buy", "POST", { item: "nope", variant: "x" }, a.token, 404);
+  await request("/me/equip", "POST", { kind: "decoration", item: deco.id, variant: deco.variants[0] }, a.token, 403); // not owned
+  await request("/shop/test-grant", "POST", { orbs: deco.price * 2 - 1 }, a.token);
+  shop = await request("/shop/buy", "POST", { item: deco.id, variant: deco.variants[0] }, a.token);
+  assert.equal(shop.orbs, deco.price - 1);
+  assert.deepEqual(shop.owned, [{ item: deco.id, variant: deco.variants[0] }]);
+  await request("/shop/buy", "POST", { item: deco.id, variant: deco.variants[0] }, a.token, 409);      // already own it
+  await request("/shop/buy", "POST", { item: deco.id, variant: deco.variants[1] }, a.token, 409);      // one Orb short
+  shop = await request("/me/equip", "POST", { kind: "decoration", item: deco.id, variant: deco.variants[0] }, a.token);
+  assert.equal(shop.equipped.decoration, deco.id + ":" + deco.variants[0]);
+  await request("/me/equip", "POST", { kind: "frame", item: deco.id, variant: deco.variants[0] }, a.token, 404); // wrong kind
+  const seen = await request("/people/" + a.account.id, "GET", undefined, b.token);
+  assert.equal(seen.equipped.decoration, deco.id + ":" + deco.variants[0]);
+  assert.equal((await request("/me", "GET", undefined, a.token)).account.equipped.decoration, deco.id + ":" + deco.variants[0]);
+  shop = await request("/me/equip", "POST", { kind: "decoration", item: null }, a.token);
+  assert.deepEqual(shop.equipped, {});
 });

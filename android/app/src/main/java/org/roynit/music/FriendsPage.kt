@@ -28,10 +28,10 @@ import java.io.ByteArrayOutputStream
  * what they are listening to, requests, chat, and your profile with picture, cover, status and Orbs.
  */
 class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
-    private enum class Mode { Friends, Profile, Chat, Person }
+    private enum class Mode { Friends, Profile, Chat, Person, Shop }
 
-    private val body = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-    private val scroll = ScrollView(context).apply { isVerticalScrollBarEnabled = false; addView(body) }
+    private val body = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; clipChildren = false }
+    private val scroll = ScrollView(context).apply { isVerticalScrollBarEnabled = false; clipChildren = false; addView(body) }
     private val ui = Handler(Looper.getMainLooper())
     private var creating = false
     private var busy = false
@@ -42,6 +42,19 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
     private var lastMessage = 0L
     private var shown = false
     private var picking = 0
+
+    // Frame and effect the page being looked at is wearing, drawn over it.
+    private val frameView = FrameOverlay(context)
+    private val effectView = EffectView(context)
+    private val shop = ShopScreen(context, { render() }, { back() }, { mode = Mode.Profile; render() })
+
+    /** Opens the Orbs shop (from the menu or your profile). */
+    fun openShop() {
+        if (!Account.signedIn) return
+        mode = Mode.Shop
+        shop.load()
+        render()
+    }
 
     private val poll = object : Runnable {
         override fun run() {
@@ -55,7 +68,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
     private val messages = ArrayList<JSONObject>()
     private val chatList = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL; setPadding(c.dp(16), c.dp(8), c.dp(16), c.dp(8)) }
     private val chatScroll = ScrollView(c).apply { isVerticalScrollBarEnabled = false; addView(chatList) }
-    private val chatHead = LinearLayout(c).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(c.dp(8), c.dp(6), c.dp(16), c.dp(6)) }
+    private val chatHead = LinearLayout(c).apply { clipChildren = false; gravity = Gravity.CENTER_VERTICAL; setPadding(c.dp(8), c.dp(6), c.dp(16), c.dp(6)) }
     private val chatField = EditText(c).apply {
         hint = "Message"
         setHintTextColor(Ui.MUTED)
@@ -78,6 +91,9 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
     init {
         addView(scroll, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         addView(chatRoot, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        addView(effectView, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        addView(frameView, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        Shop.load(context)
         buildComposer()
         body.setPadding(c.dp(20), c.dp(16), c.dp(20), c.dp(16))
         Account.load(context)
@@ -104,7 +120,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
     /** Back button: leaves a chat or the profile first. */
     fun back(): Boolean {
         if (mode == Mode.Friends) return false
-        mode = Mode.Friends
+        mode = if (mode == Mode.Shop && Account.signedIn) Mode.Profile else Mode.Friends
         render()
         loadFriends()
         return true
@@ -144,7 +160,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
     }
 
     /** A round picture, or the person's first letter until (or unless) there is one. */
-    private fun avatar(name: String, url: String?, size: Int): View {
+    private fun avatar(name: String, url: String?, size: Int, equipped: JSONObject? = null): View {
         val letter = c.label(size / 2.6f, Color.WHITE, bold = true).apply {
             text = name.take(1).uppercase()
             gravity = Gravity.CENTER
@@ -158,7 +174,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
         }
         if (url != null) Images.load(image, url, c.dp(size))
         box.layoutParams = LinearLayout.LayoutParams(c.dp(size), c.dp(size))
-        return box
+        return Shop.decorate(c, box, size, equipped)
     }
 
     /** A picture address from the profile; the server sends null when there is none, which optString turns into "null". */
@@ -176,6 +192,15 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
         Notifier.chatOpenWith = if (mode == Mode.Chat && shown) chatWith?.optString("id") else null
         val chat = Account.signedIn && mode == Mode.Chat
         val profile = Account.signedIn && (mode == Mode.Profile || mode == Mode.Person)
+        // A frame and an effect belong to the profile on screen, and to nothing else.
+        val worn = when {
+            !Account.signedIn -> null
+            mode == Mode.Profile -> Account.profile.optJSONObject("equipped")
+            mode == Mode.Person -> details?.optJSONObject("equipped") ?: viewing?.optJSONObject("equipped")
+            else -> null
+        }
+        Shop.worn(worn, "frame").let { frameView.show(it?.first, it?.second) }
+        Shop.worn(worn, "effect").let { effectView.show(it?.first, it?.second) }
         scroll.visibility = if (chat) GONE else VISIBLE
         chatRoot.visibility = if (chat) VISIBLE else GONE
         body.removeAllViews()
@@ -184,6 +209,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
         when {
             !Account.signedIn -> signInForm()
             mode == Mode.Person -> drawPerson()
+            mode == Mode.Shop -> shop.draw(body)
             profile -> drawProfile()
             chat -> drawChat()
             else -> drawFriends()
@@ -322,7 +348,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
             gravity = Gravity.CENTER_VERTICAL
             background = roundRect(Ui.SURFACE, c.dp(14))
             setPadding(c.dp(12), c.dp(10), c.dp(12), c.dp(10))
-            addView(avatar(Account.name, link(me, "avatar_url"), 44))
+            addView(avatar(Account.name, link(me, "avatar_url"), 44, me.optJSONObject("equipped")))
             addView(LinearLayout(c).apply {
                 orientation = LinearLayout.VERTICAL
                 addView(c.label(15f, Color.WHITE, bold = true).apply { text = Account.name })
@@ -357,7 +383,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
         val outgoing = social.optJSONArray("outgoing")
         if (outgoing != null && outgoing.length() > 0) {
             section("Waiting for an answer")
-            for (i in 0 until outgoing.length()) outgoing.getJSONObject(i).let { p -> row(p, "Request sent").apply { background = pressable(); setOnClickListener { openPerson(p) } } }
+            for (i in 0 until outgoing.length()) outgoing.getJSONObject(i).let { p -> row(p, "Request sent").apply { foreground = pressable(); setOnClickListener { openPerson(p) } } }
         }
     }
 
@@ -368,10 +394,12 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
             addView(c.label(15f, Color.WHITE, bold = true).apply { text = name })
             addView(c.label(13f, Ui.MUTED).apply { text = line; setPadding(0, c.dp(2), 0, 0) })
         }
+        val plate = Shop.plate(c, person.optJSONObject("equipped"))
         val item = LinearLayout(c).apply {
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, c.dp(8), 0, c.dp(8))
-            addView(avatar(name, Account.avatarUrl(person.optString("id"), person.optInt("avatar_version")), 44))
+            clipChildren = false
+            if (plate != null) { background = plate; setPadding(c.dp(12), c.dp(10), c.dp(12), c.dp(10)) } else setPadding(0, c.dp(8), 0, c.dp(8))
+            addView(avatar(name, Account.avatarUrl(person.optString("id"), person.optInt("avatar_version")), 44, person.optJSONObject("equipped")))
             addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = c.dp(12) })
             if (badge > 0) addView(c.label(12f, Color.BLACK, bold = true).apply {
                 text = badge.toString()
@@ -394,7 +422,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
         }
         val unread = social.optJSONObject("unread")?.optInt(person.optString("id")) ?: 0
         row(person, line, badge = unread).apply {
-            background = pressable()
+            foreground = pressable()
             setOnClickListener { openPerson(person) }
         }
     }
@@ -422,6 +450,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
 
     private fun drawPerson() {
         val person = viewing ?: return
+        val inset = if (Shop.worn(details?.optJSONObject("equipped") ?: person.optJSONObject("equipped"), "frame") != null) 30 else 12
         val info = details
         val id = person.optString("id")
         val name = person.optString("display_name")
@@ -438,25 +467,26 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
                 rotation = 90f
                 background = roundRect(0x99000000.toInt(), c.dp(20))
                 setOnClickListener { back() }
-            }, LayoutParams(c.dp(40), c.dp(40), Gravity.TOP or Gravity.START).apply { setMargins(c.dp(12), c.dp(12), 0, 0) })
+            }, LayoutParams(c.dp(40), c.dp(40), Gravity.TOP or Gravity.START).apply { setMargins(c.dp(inset), c.dp(inset), 0, 0) })
             if (relation == "friend") addView(c.icon(R.drawable.ic_more, Color.WHITE, 40, 9).apply {
                 background = roundRect(0x99000000.toInt(), c.dp(20))
                 setOnClickListener { friendMenu(person, person.optJSONObject("listening")) }
-            }, LayoutParams(c.dp(40), c.dp(40), Gravity.TOP or Gravity.END).apply { setMargins(0, c.dp(12), c.dp(12), 0) })
+            }, LayoutParams(c.dp(40), c.dp(40), Gravity.TOP or Gravity.END).apply { setMargins(0, c.dp(inset), c.dp(inset), 0) })
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         val listening = person.optJSONObject("listening")
         val online = person.optBoolean("online")
         val ring = FrameLayout(c).apply {
+            clipChildren = false
             background = roundRect(Ui.BG, c.dp(52))
             setPadding(c.dp(5), c.dp(5), c.dp(5), c.dp(5))
-            addView(avatar(name, Account.avatarUrl(id, person.optInt("avatar_version")), 86), LayoutParams(c.dp(86), c.dp(86)))
+            addView(avatar(name, Account.avatarUrl(id, person.optInt("avatar_version")), 86, details?.optJSONObject("equipped") ?: person.optJSONObject("equipped")))
             if (relation == "friend") addView(View(c).apply {
                 background = roundRect(if (online) 0xFF23A55A.toInt() else 0xFF80848E.toInt(), c.dp(10)).also { it.setStroke(c.dp(3), Ui.BG) }
             }, LayoutParams(c.dp(24), c.dp(24), Gravity.BOTTOM or Gravity.END))
         }
-        body.addView(ring, LinearLayout.LayoutParams(c.dp(96), c.dp(96)).apply { topMargin = -c.dp(46); marginStart = c.dp(14) })
-        body.addView(c.label(25f, Color.WHITE, bold = true).apply { text = name; setPadding(c.dp(18), c.dp(8), c.dp(18), 0) })
+        body.addView(ring, LinearLayout.LayoutParams(c.dp(96), c.dp(96)).apply { topMargin = -c.dp(46); marginStart = c.dp(if (Shop.worn(details?.optJSONObject("equipped") ?: person.optJSONObject("equipped"), "decoration") != null) 40 else 14) })
+        body.addView(c.label(25f, Color.WHITE, bold = true).apply { text = name; setPadding(c.dp(18), c.dp(if (Shop.worn(details?.optJSONObject("equipped") ?: person.optJSONObject("equipped"), "decoration") != null) 30 else 8), c.dp(18), 0) })
         body.addView(c.label(14f, Ui.MUTED).apply { text = "@" + person.optString("username"); setPadding(c.dp(18), c.dp(2), c.dp(18), 0) })
 
         // Message and the rest, like the buttons under a Discord profile.
@@ -559,7 +589,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
             addView(button("Accept", true) { answer(person, "accept") })
             addView(button("Decline") { answer(person, "decline") }, side(8))
         }
-        row(person, "@" + person.optString("username"), buttons).apply { background = pressable(); setOnClickListener { openPerson(person) } }
+        row(person, "@" + person.optString("username"), buttons).apply { foreground = pressable(); setOnClickListener { openPerson(person) } }
     }
 
     /** Someone your friends know: one tap sends the request. */
@@ -575,7 +605,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
                 }
             }.start()
         }
-        row(person, line, add).apply { background = pressable(); setOnClickListener { openPerson(person) } }
+        row(person, line, add).apply { foreground = pressable(); setOnClickListener { openPerson(person) } }
     }
 
     private fun answer(person: JSONObject, what: String) {
@@ -636,7 +666,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
         val person = chatWith ?: return
         chatHead.removeAllViews()
         chatHead.addView(c.icon(R.drawable.ic_down, Color.WHITE, 44, 10).apply { rotation = 90f; setOnClickListener { back() } })
-        chatHead.addView(avatar(person.optString("display_name"), Account.avatarUrl(person.optString("id"), person.optInt("avatar_version")), 38), side(2))
+        chatHead.addView(avatar(person.optString("display_name"), Account.avatarUrl(person.optString("id"), person.optInt("avatar_version")), 38, person.optJSONObject("equipped")), side(2))
         chatHead.addView(LinearLayout(c).apply {
             orientation = LinearLayout.VERTICAL
             addView(c.label(17f, Color.WHITE, bold = true).apply { text = person.optString("display_name") })
@@ -733,6 +763,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
 
     private fun drawProfile() {
         val me = Account.profile
+        val inset = if (Shop.worn(me.optJSONObject("equipped"), "frame") != null) 30 else 12
         val green = 0xFF1B5E3A.toInt()
         // Cover, with the back button floating over it.
         val cover = ImageView(c).apply {
@@ -746,22 +777,23 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
                 rotation = 90f
                 background = roundRect(0x99000000.toInt(), c.dp(20))
                 setOnClickListener { back() }
-            }, LayoutParams(c.dp(40), c.dp(40), Gravity.TOP or Gravity.START).apply { setMargins(c.dp(12), c.dp(12), 0, 0) })
+            }, LayoutParams(c.dp(40), c.dp(40), Gravity.TOP or Gravity.START).apply { setMargins(c.dp(inset), c.dp(inset), 0, 0) })
         }
         body.addView(top, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         // The picture sits half over the cover with a ring in the page colour, and a status dot like Discord's.
         val ring = FrameLayout(c).apply {
+            clipChildren = false
             background = roundRect(Ui.BG, c.dp(52))
             setPadding(c.dp(5), c.dp(5), c.dp(5), c.dp(5))
-            addView(avatar(Account.name, link(me, "avatar_url"), 86), LayoutParams(c.dp(86), c.dp(86)))
+            addView(avatar(Account.name, link(me, "avatar_url"), 86, me.optJSONObject("equipped")))
             addView(View(c).apply {
                 background = roundRect(if (Account.invisible) 0xFF80848E.toInt() else 0xFF23A55A.toInt(), c.dp(10)).also { it.setStroke(c.dp(3), Ui.BG) }
             }, LayoutParams(c.dp(24), c.dp(24), Gravity.BOTTOM or Gravity.END))
         }
-        body.addView(ring, LinearLayout.LayoutParams(c.dp(96), c.dp(96)).apply { topMargin = -c.dp(46); marginStart = c.dp(14) })
+        body.addView(ring, LinearLayout.LayoutParams(c.dp(96), c.dp(96)).apply { topMargin = -c.dp(46); marginStart = c.dp(if (Shop.worn(me.optJSONObject("equipped"), "decoration") != null) 40 else 14) })
 
-        body.addView(c.label(25f, Color.WHITE, bold = true).apply { text = Account.name; setPadding(c.dp(18), c.dp(8), c.dp(18), 0) })
+        body.addView(c.label(25f, Color.WHITE, bold = true).apply { text = Account.name; setPadding(c.dp(18), c.dp(if (Shop.worn(me.optJSONObject("equipped"), "decoration") != null) 30 else 8), c.dp(18), 0) })
         body.addView(c.label(14f, Ui.MUTED).apply { text = "@${Account.username}"; setPadding(c.dp(18), c.dp(2), c.dp(18), 0) })
         body.addView(c.label(15f, Color.BLACK, bold = true).apply {
             text = "Edit profile"
@@ -790,7 +822,8 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
                 background = roundRect(Ui.RAISED, c.dp(14))
                 setPadding(c.dp(14), c.dp(7), c.dp(14), c.dp(7))
             })
-        }, c.label(12f, Ui.MUTED, lines = 2).apply { text = "Orbs are spent in the Roy Music shop, coming later."; ellipsize = null; setPadding(0, c.dp(8), 0, 0) })
+        }, c.label(12f, Ui.MUTED, lines = 2).apply { text = "Earn Orbs with daily listening quests and spend them on looks for your profile."; ellipsize = null; setPadding(0, c.dp(8), 0, c.dp(4)) },
+            action("Open the shop and quests") { openShop() })
 
         val bio = me.optString("bio")
         card(
