@@ -164,7 +164,7 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
         // Spotify's bottom row: devices on the left, share and the queue on the right.
         val tools = LinearLayout(c).apply {
             gravity = Gravity.CENTER_VERTICAL
-            addView(c.icon(R.drawable.ic_devices, 0xCCFFFFFF.toInt(), 44, 11).apply { setOnClickListener { sleepTimer() } })
+            addView(c.icon(R.drawable.ic_devices, 0xCCFFFFFF.toInt(), 44, 11).apply { setOnClickListener { openConnect() } })
             addView(View(c), LinearLayout.LayoutParams(0, 1, 1f))
             addView(c.icon(R.drawable.ic_share, 0xCCFFFFFF.toInt(), 44, 11).apply { setOnClickListener { share() } })
             addView(c.icon(R.drawable.ic_queue, 0xCCFFFFFF.toInt(), 44, 11).apply { setOnClickListener { openQueue() } })
@@ -473,6 +473,35 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
             if (lyricsPage.visibility == View.VISIBLE) lyricsScroll.smoothScrollTo(0, (lyricsList.getChildAt(now).top - lyricsScroll.height / 3).coerceAtLeast(0))
         }
         drawLyricPreview()
+    }
+
+    // ---- where the music plays ----
+
+    /** Like Spotify's Connect sheet: this phone and what is playing, then the ways to send the sound somewhere else. */
+    private fun openConnect() {
+        val activity = c as android.app.Activity
+        val song = Playback.song
+        val card = LinearLayout(c).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            background = roundRect(0xFF333333.toInt(), c.dp(12))
+            setPadding(c.dp(16), c.dp(14), c.dp(16), c.dp(14))
+            addView(LinearLayout(c).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(c.label(19f, Color.WHITE, bold = true).apply { text = "This phone" })
+                if (song != null) addView(c.label(14f, Ui.GREEN, lines = 1).apply { text = song.title + " – " + song.artist; setPadding(0, c.dp(4), 0, 0) })
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(c.icon(R.drawable.ic_devices, Ui.GREEN, 40, 6).apply { isClickable = false; background = null })
+        }
+        fun open(vararg actions: String): Boolean {
+            for (action in actions) if (runCatching { activity.startActivity(android.content.Intent(action)) }.isSuccess) return true
+            return false
+        }
+        Sheet.show(activity, "Connect", "", null, listOf(
+            Sheet.Option("Find Bluetooth device", R.drawable.ic_devices) {
+                if (!open(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)) c.say("Could not open Bluetooth settings")
+            },
+            Sheet.Option("Sleep timer", R.drawable.ic_moon) { sleepTimer() },
+        ), header = card)
     }
 
     // ---- small menus ----

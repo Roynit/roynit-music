@@ -20,3 +20,4 @@
 /target-android/
 *.jks
 *.keystore
+/.wrangler/

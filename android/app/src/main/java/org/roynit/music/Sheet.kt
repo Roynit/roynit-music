@@ -20,7 +20,7 @@ import android.widget.ScrollView
 object Sheet {
     class Option(val label: String, val icon: Int? = null, val color: Int = Color.WHITE, val run: () -> Unit)
 
-    fun show(activity: Activity, title: String, subtitle: String = "", cover: String? = null, options: List<Option>) {
+    fun show(activity: Activity, title: String, subtitle: String = "", cover: String? = null, options: List<Option>, header: View? = null) {
         val dialog = Dialog(activity)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         val c = activity
@@ -59,6 +59,7 @@ object Sheet {
             column.addView(head)
             column.addView(View(c).apply { setBackgroundColor(0x22FFFFFF) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply { bottomMargin = c.dp(4) })
         }
+        if (header != null) column.addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(c.dp(16), c.dp(4), c.dp(16), c.dp(8)) })
         val rows = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL }
         for (option in options) {
             rows.addView(
