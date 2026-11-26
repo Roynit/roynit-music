@@ -1,6 +1,7 @@
 //! Friends, what each friend is listening to, and direct messages, all kept on the Roynit ID server.
 //! Everything runs on short-lived worker threads; the UI only reads the latest snapshot.
 use reqwest::blocking::Client;
+use riff_core::model::Track;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -95,6 +96,7 @@ enum Tag {
     Chat(String),
     Send(String),
     Act(String),
+    Taste(String),
 }
 
 type Reply = Result<Value, String>;
@@ -109,6 +111,8 @@ pub struct Social {
     pub outgoing: Vec<Person>,
     /// People you may know: friends of your friends.
     pub suggestions: Vec<Person>,
+    /// A friend's favourite songs, fetched for Blend: the friend's name and the songs. The app takes it once.
+    pub taste: Option<(String, Vec<Track>)>,
     pub unread: HashMap<String, u32>,
     pub chats: HashMap<String, Chat>,
     /// Seconds the server clock was ahead of the sender's last heartbeat when the snapshot arrived.
@@ -143,6 +147,7 @@ impl Social {
             incoming: Vec::new(),
             outgoing: Vec::new(),
             suggestions: Vec::new(),
+            taste: None,
             unread: HashMap::new(),
             chats: HashMap::new(),
             server_now: 0,
@@ -244,6 +249,11 @@ impl Social {
         let path = if accept { "/friends/accept" } else { "/friends/decline" };
         let note = if accept { "accepted" } else { "declined" };
         self.call(Tag::Act(note.into()), reqwest::Method::POST, path.into(), Some(json!({"id":id})));
+    }
+
+    /// Asks for what a friend loves most, so the app can blend it with your own music.
+    pub fn fetch_taste(&mut self, id: &str, name: &str) {
+        self.call(Tag::Taste(name.to_owned()), reqwest::Method::GET, format!("/friends/{id}/taste"), None);
     }
 
     pub fn remove(&mut self, id: &str) {
@@ -414,6 +424,15 @@ impl Social {
                 }
                 self.notice = Some((error, true));
             }
+            (Tag::Taste(name), Ok(data)) => {
+                let tracks: Vec<Track> = serde_json::from_value(data["tracks"].clone()).unwrap_or_default();
+                if tracks.is_empty() {
+                    self.notice = Some((format!("{name} has not shared any songs yet."), true));
+                } else {
+                    self.taste = Some((name, tracks));
+                }
+            }
+            (Tag::Taste(_), Err(error)) => self.notice = Some((error, true)),
             (Tag::Act(_), Err(error)) => self.notice = Some((error, true)),
             // A refresh that fails just waits for the next one.
             (Tag::Social | Tag::Suggest | Tag::Chat(_) | Tag::Presence, _) => {}

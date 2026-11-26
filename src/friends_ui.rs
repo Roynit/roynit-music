@@ -122,6 +122,18 @@ impl App {
         {
             self.open_chat = None;
         }
+        // A friend's songs arrived for Blend: mix them with yours into a playlist.
+        if let Some((name, theirs)) = self.social.taste.take() {
+            match riff_core::mixes::blend_with_friend(&self.library, &theirs) {
+                Some((tracks, shared, percent)) => {
+                    self.send("mix-saved", "mix.apply", json!({"name":format!("Blend: You & {name}"),"tracks":tracks,"play":false}));
+                    self.friends_notice = Some((format!("You and {name}: {percent}% match. {shared} songs you both have, {} in all, saved to your playlists.", tracks.len()), false, Instant::now()));
+                }
+                None => {
+                    self.friends_notice = Some(("Like or play a few songs first, so there is something to blend.".into(), true, Instant::now()));
+                }
+            }
+        }
     }
 
     fn badge_count(&self) -> usize {
@@ -618,6 +630,11 @@ impl App {
             ui.add_space(12.);
             ui.menu_button("More", |ui| {
                 super::menu_style(ui);
+                if ui.button("Blend our music").clicked() {
+                    self.social.fetch_taste(&person.id, &person.display_name);
+                    self.friends_notice = Some((format!("Blending with {}…", person.display_name), false, Instant::now()));
+                    ui.close();
+                }
                 if ui.button("Remove friend").clicked() {
                     let sure = rfd::MessageDialog::new()
                         .set_title("Remove friend?")
@@ -763,6 +780,11 @@ impl App {
                     super::menu_style(ui);
                     if ui.button("Message").clicked() {
                         self.open_friend(&id);
+                        ui.close();
+                    }
+                    if ui.button("Blend our music").clicked() {
+                        self.social.fetch_taste(&id, &friend.person.display_name);
+                        self.friends_notice = Some((format!("Blending with {}…", friend.person.display_name), false, Instant::now()));
                         ui.close();
                     }
                     if ui.button("Remove friend").clicked() {

@@ -313,6 +313,53 @@ pub(crate) fn blend(mixes: &[Mix], taste: &Taste) -> Vec<Mix> {
         .collect()
 }
 
+/// Blend: a playlist from your music and a friend's. The songs you both have come first, then yours and theirs take
+/// turns (up to 50), leaving out what either of you turned off. Also returns how many songs you share and how much
+/// of your artists overlap, as a percentage.
+pub fn blend_with_friend(library: &Library, theirs: &[Track]) -> Option<(Vec<Track>, usize, u32)> {
+    let avoid = Avoid::new(library);
+    let playable = |track: &Track| crate::youtube_stream::video_id(&track.source).is_some() && !avoid.blocks(track);
+    let mut mine: Vec<Track> = Vec::new();
+    let mut seen = HashSet::new();
+    for id in library.favorites.iter().rev().chain(library.history.iter().rev().map(|event| &event.track_id)) {
+        if let Some(track) = library.tracks.get(id).filter(|t| playable(t)) {
+            if seen.insert(track.id.clone()) {
+                mine.push(track.clone());
+            }
+        }
+    }
+    let theirs: Vec<Track> = theirs.iter().filter(|t| playable(t)).cloned().collect();
+    if mine.is_empty() || theirs.is_empty() {
+        return None;
+    }
+    let mine_ids: HashSet<&str> = mine.iter().map(|t| t.id.as_str()).collect();
+    let shared: Vec<Track> = theirs.iter().filter(|t| mine_ids.contains(t.id.as_str())).cloned().collect();
+    let mut blend: Vec<Track> = Vec::new();
+    let mut ids: HashSet<String> = HashSet::new();
+    for track in shared.iter() {
+        if ids.insert(track.id.clone()) {
+            blend.push(track.clone());
+        }
+    }
+    let (mut a, mut b) = (mine.iter(), theirs.iter());
+    while blend.len() < 50 {
+        let (x, y) = (a.next(), b.next());
+        if x.is_none() && y.is_none() {
+            break;
+        }
+        for track in [x, y].into_iter().flatten() {
+            if blend.len() < 50 && ids.insert(track.id.clone()) {
+                blend.push(track.clone());
+            }
+        }
+    }
+    let mine_artists: HashSet<String> = mine.iter().map(artist_key).collect();
+    let their_artists: HashSet<String> = theirs.iter().map(artist_key).collect();
+    let union = mine_artists.union(&their_artists).count().max(1);
+    let percent = ((mine_artists.intersection(&their_artists).count() * 100 / union) as u32).clamp(1, 99);
+    Some((blend, shared.len(), percent))
+}
+
 pub(crate) fn validate_tracks(value: &Value) -> Result<Vec<Track>> {
     let tracks: Vec<Track> = serde_json::from_value(value.clone())?;
     ensure!(
@@ -645,6 +692,29 @@ mod taste_tests {
         let avoid = Avoid::new(&library);
         assert!(!avoid.blocks(&track("ok", "Band")), "a hearted song always stays");
         assert!(!avoid.blocks(&track("other", "Else")));
+    }
+
+    fn playable(id: &str, artist: &str) -> Track {
+        serde_json::from_value(json!({"id":format!("ytmusic:{id}"),"title":id,"artist":artist,"source":format!("https://music.youtube.com/watch?v={id}"),"platform":"ytmusic"})).unwrap()
+    }
+
+    #[test]
+    fn a_friend_blend_puts_shared_songs_first_then_alternates_and_skips_dislikes() {
+        let mut library = Library::default();
+        for (id, artist) in [("mmmmmmmmmm1", "Me"), ("mmmmmmmmmm2", "Me"), ("sssssssss01", "Both"), ("xxxxxxxxxx1", "Nope")] {
+            library.tracks.insert(format!("ytmusic:{id}"), playable(id, artist));
+        }
+        library.favorites = vec!["ytmusic:mmmmmmmmmm1".into(), "ytmusic:sssssssss01".into()];
+        library.history = vec![PlayEvent { track_id: "ytmusic:mmmmmmmmmm2".into(), started_at: NOW }];
+        library.dislikes = vec!["ytmusic:xxxxxxxxxx1".into()];
+        let theirs = vec![playable("sssssssss01", "Both"), playable("tttttttttt1", "Them"), playable("xxxxxxxxxx1", "Nope")];
+        let (blend, shared, percent) = blend_with_friend(&library, &theirs).unwrap();
+        assert_eq!(blend[0].id, "ytmusic:sssssssss01", "what you both have comes first");
+        assert_eq!(shared, 1);
+        assert!(blend.iter().any(|t| t.id == "ytmusic:tttttttttt1") && blend.iter().any(|t| t.id == "ytmusic:mmmmmmmmmm2"));
+        assert!(blend.iter().all(|t| t.id != "ytmusic:xxxxxxxxxx1"), "a song you turned off stays out");
+        assert!((1..=99).contains(&percent));
+        assert!(blend_with_friend(&Library::default(), &theirs).is_none());
     }
 
     #[test]

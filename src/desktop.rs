@@ -5,6 +5,7 @@ mod friends_ui;
 mod import_ui;
 mod reorder_ui;
 mod roy_account_ui;
+mod stats_ui;
 mod system_media;
 use eframe::egui::{self, Color32, RichText};
 use riff_core::{
@@ -201,6 +202,7 @@ struct App {
     browse_title: String,
     data_root: PathBuf,
     import_url: String,
+    stats_open: bool,
     oauth_client: String,
     oauth_secret: String,
     oauth_provider: usize,
@@ -485,6 +487,7 @@ impl App {
             browse_title: String::new(),
             data_root,
             import_url: String::new(),
+            stats_open: false,
             oauth_client: String::new(),
             oauth_secret: String::new(),
             oauth_provider: 0,
@@ -979,6 +982,14 @@ impl App {
                         .map(|track| track.source.clone())
                         .collect(),
                 );
+            }
+            "open-artist" => {
+                self.busy = false;
+                let artist = data["items"].as_array().and_then(|items| items.iter().find(|item| item["kind"] == "artist")).cloned();
+                match artist {
+                    Some(item) => self.open_search_collection(&item),
+                    None => self.status = "Could not find that artist".into(),
+                }
             }
             "mix-saved" => self.status = "Mix saved to your playlists".into(),
             "home" | "browse" | "recommendations" => {
@@ -2313,11 +2324,8 @@ impl App {
                 self.set_dislike(track, !disliked);
                 ui.close();
             }
-            if !track.artist.is_empty() && ui.button("Find artist").clicked() {
-                self.query = track.artist.clone();
-                self.search_source = 0;
-                self.search_filter = "artists".into();
-                self.search();
+            if !track.artist.is_empty() && ui.button("Go to artist").clicked() {
+                self.go_to_artist(&track.artist);
                 ui.close();
             }
             if !track.album.is_empty() && ui.button("Find album").clicked() {
@@ -2630,6 +2638,22 @@ impl App {
         }
         ui.add_space(10.);
     }
+    /// Opens an artist's page from just a name, like tapping the name on the phone app.
+    fn go_to_artist(&mut self, name: &str) {
+        let name = name.split(',').next().unwrap_or(name).trim();
+        if name.is_empty() {
+            return;
+        }
+        self.status = format!("Looking for {name}…");
+        self.job("open-artist", "music.search", json!({"query":name,"filter":"artists"}));
+    }
+    /// An artist name that opens the artist's page when clicked.
+    fn artist_link(&mut self, ui: &mut egui::Ui, artist: &str, text: RichText) {
+        let label = ui.add(egui::Label::new(text).truncate().sense(egui::Sense::click()));
+        if label.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Go to artist").clicked() {
+            self.go_to_artist(artist);
+        }
+    }
     fn open_search_collection(&mut self, item: &Value) {
         self.search_open = false;
         self.navigation.push((
@@ -2642,11 +2666,15 @@ impl App {
         self.page = Page::Browse;
         self.browse_title = item["title"].as_str().unwrap_or("").into();
         self.busy = true;
-        self.send(
-            "browse",
-            "music.browse",
-            json!({"id":item["id"],"params":item["params"]}),
-        );
+        if item["kind"] == "podcast" {
+            self.send("browse", "job.submit", json!({"operation":"music.podcast","params":{"id":item["id"]}}));
+        } else {
+            self.send(
+                "browse",
+                "music.browse",
+                json!({"id":item["id"],"params":item["params"]}),
+            );
+        }
     }
 
     /// Glow colour for a cover; decoded once per URI on a helper thread, never on the audio path.
@@ -3398,7 +3426,7 @@ impl App {
     /// Turns a song off: it is not suggested again, leaves the queue, and if it is playing the next one starts.
     fn set_dislike(&mut self, track: &Track, disliked: bool) {
         self.send("add", "library.add", json!({"track":track}));
-        self.send("dislike", "dislikes.set", json!({"id":track.id,"enabled":disliked}));
+        self.send("dislike", "dislikes.set", json!({"id":track.id,"enabled":disliked,"track":track}));
         if disliked && self.current_track().is_some_and(|current| current.id == track.id) {
             self.send("next", "player.next", json!({}));
         }
@@ -3468,7 +3496,7 @@ impl App {
             self.send(
                 "favorite",
                 "favorites.set",
-                json!({"id":track.id,"enabled":!liked}),
+                json!({"id":track.id,"enabled":!liked,"track":track}),
             );
         }
     }
@@ -3702,9 +3730,7 @@ impl App {
                             egui::Label::new(RichText::new(&track.title).size(20.).bold())
                                 .truncate(),
                         );
-                        ui.add(
-                            egui::Label::new(RichText::new(&track.artist).color(MUTED)).truncate(),
-                        );
+                        self.artist_link(ui, &track.artist, RichText::new(&track.artist).color(MUTED));
                     });
                     self.like_button(ui, &track);
                     self.dislike_button(ui, &track);
@@ -3779,7 +3805,7 @@ impl App {
                                 egui::Label::new(RichText::new(&track.title).size(30.).bold())
                                     .truncate(),
                             );
-                            ui.label(RichText::new(&track.artist).size(17.).color(MUTED));
+                            self.artist_link(ui, &track.artist, RichText::new(&track.artist).size(17.).color(MUTED));
                             let accent = ui.visuals().selection;
                             self.transport(ui, left, accent.bg_fill, accent.stroke.color);
                             self.timeline(ui, left);
@@ -5087,6 +5113,10 @@ impl App {
                 .clicked()
             {
                 self.open_import();
+                ui.close();
+            }
+            if self.nav_item(ui, "📈", "Listening stats", self.stats_open).clicked() {
+                self.stats_open = true;
                 ui.close();
             }
             ui.separator();
@@ -7244,6 +7274,7 @@ impl App {
         for (kind, label) in [
             ("album", "Albums"),
             ("playlist", "Playlists"),
+            ("podcast", "Podcasts"),
             ("artist", "Artists"),
         ] {
             let items: Vec<_> = self
@@ -7840,6 +7871,7 @@ impl eframe::App for App {
         if !self.roy_account.needs_sign_in() {
             self.settings_dialog(ctx);
             self.import_dialog(ctx);
+            self.stats_dialog(ctx);
         }
         if let Some((message, failed)) = self.roy_account.take_link_notice() {
             if failed {

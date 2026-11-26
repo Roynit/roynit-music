@@ -1042,6 +1042,7 @@ impl Engine {
                 "music.home",
                 "music.charts",
                 "music.browse",
+                "music.podcast",
                 "recommendations.radio"
             ]
             .contains(&op.as_str()),
@@ -1079,6 +1080,7 @@ impl Engine {
                 "music.home" => youtube::Music{client:&client,cookies:providers.cookies.as_ref()}.home(),
                 "music.charts" => youtube::Music{client:&client,cookies:providers.cookies.as_ref()}.charts(),
                 "music.browse" => youtube::Music{client:&client,cookies:providers.cookies.as_ref()}.browse(text(&params,"id")?,params["params"].as_str()),
+                "music.podcast" => youtube::Music{client:&client,cookies:providers.cookies.as_ref()}.podcast(text(&params,"id")?),
                 "recommendations.radio" => {
                     let seed=text(&params,"seed")?.trim_start_matches("youtube:");
                     let mut value=youtube::Music{client:&client,cookies:providers.cookies.as_ref()}.radio(seed,params["limit"].as_u64().unwrap_or(50) as usize,params["continuation"].as_str())?;
@@ -1390,6 +1392,23 @@ impl Engine {
         self.store.save()
     }
     /// Synchronous command boundary. Call from a dedicated worker, never the UI render thread.
+    /// A heart or a dislike may reach the engine before the song itself was added (or for a song whose address the
+    /// library will not store): the song that came with the request is taken in, with its address dropped if need be.
+    fn ensure_known(&mut self, p: &Value, id: &str) -> Result<()> {
+        if self.store.data.tracks.contains_key(id) {
+            return Ok(());
+        }
+        let mut track: Track = serde_json::from_value(p["track"].clone()).map_err(|_| anyhow::anyhow!("Unknown track ID"))?;
+        ensure!(track.id == id && !track.title.is_empty(), "Unknown track ID");
+        if self.dispatch(&json!({"command":"library.add","params":{"track":&track}})).is_err() {
+            track.source = String::new();
+            track.local_path = None;
+            track.cache_path = None;
+            self.store.data.tracks.insert(id.into(), track);
+        }
+        Ok(())
+    }
+
     pub fn dispatch(&mut self, request: &Value) -> Result<Value> {
         let command = text(request, "command")?;
         let p = request.get("params").unwrap_or(&Value::Null);
@@ -1844,7 +1863,7 @@ impl Engine {
             }
             "favorites.set" => {
                 let id = text(p, "id")?;
-                self.store.track(id)?;
+                self.ensure_known(p, id)?;
                 self.store.data.favorites.retain(|x| x != id);
                 if boolean(p, "enabled", true) {
                     self.store.data.favorites.push(id.into());
@@ -1854,7 +1873,7 @@ impl Engine {
             }
             "dislikes.set" => {
                 let id = text(p, "id")?;
-                self.store.track(id)?;
+                self.ensure_known(p, id)?;
                 self.store.data.dislikes.retain(|x| x != id);
                 if boolean(p, "enabled", true) {
                     self.store.data.dislikes.push(id.into());
@@ -2540,6 +2559,25 @@ mod radio_tests {
             .dispatch(&json!({"command":"queue.mode","params":{"shuffle":true}}))
             .unwrap();
         assert!(!engine.smart_shuffle());
+    }
+
+    #[test]
+    fn a_heart_or_dislike_for_a_song_not_yet_added_takes_the_song_in_instead_of_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = Engine::open(dir.path().into()).unwrap();
+        let song = fake("abcdefghijk");
+        engine
+            .dispatch(&json!({"command":"favorites.set","params":{"id":song.id,"enabled":true,"track":song}}))
+            .unwrap();
+        assert_eq!(engine.store.data.favorites, vec![song.id.clone()]);
+        engine
+            .dispatch(&json!({"command":"dislikes.set","params":{"id":song.id,"enabled":true,"track":song}}))
+            .unwrap();
+        assert_eq!(engine.store.data.dislikes, vec![song.id.clone()]);
+        assert!(engine.store.data.favorites.is_empty(), "a rejected song is no longer loved");
+        let other = fake("lmnopqrstuv");
+        let error = engine.dispatch(&json!({"command":"dislikes.set","params":{"id":other.id,"enabled":true}})).unwrap_err();
+        assert!(error.to_string().contains("Unknown track ID"));
     }
 
     #[test]
