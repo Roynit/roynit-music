@@ -62,6 +62,8 @@ struct Snapshot {
     incoming: Vec<Person>,
     outgoing: Vec<Person>,
     unread: HashMap<String, u32>,
+    #[serde(default)]
+    latest: HashMap<String, String>,
 }
 
 #[derive(Default)]
@@ -114,6 +116,10 @@ pub struct Social {
     /// A friend's favourite songs, fetched for Blend: the friend's name and the songs. The app takes it once.
     pub taste: Option<(String, Vec<Track>)>,
     pub unread: HashMap<String, u32>,
+    /// The newest unread message of each friend, for the notification text.
+    latest: HashMap<String, String>,
+    /// How many unread messages each friend already rang for.
+    rung: HashMap<String, u32>,
     pub chats: HashMap<String, Chat>,
     /// Seconds the server clock was ahead of the sender's last heartbeat when the snapshot arrived.
     server_now: i64,
@@ -149,6 +155,8 @@ impl Social {
             suggestions: Vec::new(),
             taste: None,
             unread: HashMap::new(),
+            latest: HashMap::new(),
+            rung: HashMap::new(),
             chats: HashMap::new(),
             server_now: 0,
             snapshot_at: now,
@@ -193,6 +201,25 @@ impl Social {
 
     pub fn requests(&self) -> usize {
         self.incoming.len()
+    }
+
+    /// Messages that arrived since the last call, as (friend's name, text), skipping the chat being read.
+    pub fn fresh_messages(&mut self, reading: Option<&str>) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (id, count) in &self.unread {
+            let seen = self.rung.get(id).copied().unwrap_or(0);
+            if *count > seen && reading != Some(id.as_str()) {
+                let name = self.friends.iter().find(|f| &f.person.id == id).map(|f| f.person.display_name.clone()).unwrap_or_else(|| "New message".into());
+                let mut text = self.latest.get(id).cloned().filter(|t| !t.is_empty()).unwrap_or_else(|| "Sent you a message".into());
+                if *count > 1 {
+                    text.push_str(&format!("  (+{})", count - 1));
+                }
+                out.push((name, text));
+            }
+        }
+        // Friends whose messages were read drop out, so their next message rings again.
+        self.rung = self.unread.clone();
+        out
     }
 
     pub fn unread_total(&self) -> u32 {
@@ -363,8 +390,8 @@ impl Social {
         match (tag, result) {
             (Tag::Social, Ok(data)) => {
                 if let Ok(snapshot) = serde_json::from_value::<Snapshot>(data) {
-                    (self.friends, self.incoming, self.outgoing, self.unread) =
-                        (snapshot.friends, snapshot.incoming, snapshot.outgoing, snapshot.unread);
+                    (self.friends, self.incoming, self.outgoing, self.unread, self.latest) =
+                        (snapshot.friends, snapshot.incoming, snapshot.outgoing, snapshot.unread, snapshot.latest);
                     self.server_now = snapshot.now;
                     self.snapshot_at = Instant::now();
                     self.loaded = true;

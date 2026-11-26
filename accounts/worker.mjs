@@ -9,10 +9,10 @@ const now = () => Math.floor(Date.now() / 1000);
 const hex = (bytes) => Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
 const random = () => hex(crypto.getRandomValues(new Uint8Array(32)));
 const digest = async (text) => hex(await crypto.subtle.digest("SHA-256", encoder.encode(text)));
-const publicUser = ({id, email, username, display_name, google_subject, password, orbs, share_taste, email_verified, bio, avatar_set, avatar_version, banner_set, banner_version, created_at}, base) => ({
+const publicUser = ({id, email, username, display_name, google_subject, password, orbs, share_taste, email_verified, bio, birthday, avatar_set, avatar_version, banner_set, banner_version, created_at}, base) => ({
   id, email, username, display_name, provider: google_subject ? "google" : "password",
   has_password: !!password, has_google: !!google_subject, orbs: orbs || 0, share_taste: share_taste !== 0, email_verified: !!email_verified,
-  bio: bio || "", created_at,
+  bio: bio || "", birthday: birthday || "", created_at,
   // The version in the URL changes with every upload, so browsers and the app can cache it forever.
   avatar_url: avatar_set ? base + "/avatar/" + id + "?v=" + avatar_version : null,
   banner_url: banner_set ? base + "/banner/" + id + "?v=" + banner_version : null,
@@ -557,7 +557,13 @@ async function socialSnapshot(env, user) {
   const unread = Object.create(null);
   const counts = await env.DB.prepare("SELECT sender,COUNT(*) AS n FROM messages WHERE (low=?1 OR high=?1) AND sender!=?1 AND read=0 GROUP BY sender").bind(user.id).all();
   for (const row of counts.results) unread[row.sender] = row.n;
-  const out = {now:stamp, friends:[], incoming:[], outgoing:[], unread};
+  // The newest unread message of each sender, so a notification can show what was said.
+  const latest = Object.create(null);
+  if (counts.results.length) {
+    const fresh = await env.DB.prepare("SELECT sender,body FROM messages WHERE (low=?1 OR high=?1) AND sender!=?1 AND read=0 ORDER BY id DESC LIMIT 60").bind(user.id).all();
+    for (const row of fresh.results) if (!(row.sender in latest)) latest[row.sender] = row.body.slice(0, 140);
+  }
+  const out = {now:stamp, friends:[], incoming:[], outgoing:[], unread, latest};
   for (const row of results) {
     if (row.status === "accepted") {
       const online = !row.invisible && row.seen_at > stamp - ONLINE_FOR;
@@ -738,6 +744,12 @@ async function route(request, env, ctx) {
       const bio = str(body.bio).replace(/\s+/g," ").trim();
       if (bio.length>160) throw new HttpError(400,"Keep your bio to 160 characters or fewer.");
       sets.push("bio=?"); values.push(bio);
+    }
+    if ("birthday" in body) {
+      const day = str(body.birthday).trim();
+      const real = day === "" || (/^\d{4}-\d{2}-\d{2}$/.test(day) && new Date(day + "T00:00:00Z").toISOString().startsWith(day) && day >= "1900-01-01" && day <= new Date().toISOString().slice(0, 10));
+      if (!real) throw new HttpError(400, "Enter a real birthday as year-month-day.");
+      sets.push("birthday=?"); values.push(day || null);
     }
     if ("username" in body) {
       await rate(env, request, "username", 10, user.id);

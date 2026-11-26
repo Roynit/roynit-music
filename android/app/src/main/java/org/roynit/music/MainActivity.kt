@@ -6,6 +6,7 @@ import android.app.AlertDialog
 import android.content.ComponentName
 import android.graphics.Color
 import android.os.Build
+import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -63,11 +64,26 @@ class MainActivity : Activity(), SongHost {
         super.onResume()
         Sync.resume()
         Sync.watching(true)
+        Notifier.foreground = true
+        window.decorView.postDelayed({ Notifier.wishInApp(this) }, 1500)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        openTabFromIntent()
+    }
+
+    private fun openTabFromIntent() {
+        val tab = intent.getIntExtra("tab", -1)
+        if (tab in 1..3) select(tab, false)
+        intent.removeExtra("tab")
     }
 
     override fun onPause() {
         super.onPause()
         Sync.watching(false)
+        Notifier.foreground = false
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -77,8 +93,10 @@ class MainActivity : Activity(), SongHost {
         Sync.load(this)
         Downloads.load(this)
         Sync.now()
+        Notifier.start(this)
         if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         setContentView(build())
+        openTabFromIntent()
         Library.onChange = {
             pages.forEach(Page::libraryChanged)
             nowPlaying.refresh()

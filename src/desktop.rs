@@ -3,6 +3,7 @@ mod friends;
 mod crop_ui;
 mod friends_ui;
 mod import_ui;
+mod notify;
 mod reorder_ui;
 mod roy_account_ui;
 mod stats_ui;
@@ -203,6 +204,9 @@ struct App {
     data_root: PathBuf,
     import_url: String,
     stats_open: bool,
+    greeted_day: String,
+    greeted_birthday: i32,
+    birthday_dialog: Option<i32>,
     oauth_client: String,
     oauth_secret: String,
     oauth_provider: usize,
@@ -488,6 +492,9 @@ impl App {
             data_root,
             import_url: String::new(),
             stats_open: false,
+            greeted_day: String::new(),
+            greeted_birthday: 0,
+            birthday_dialog: None,
             oauth_client: String::new(),
             oauth_secret: String::new(),
             oauth_provider: 0,
@@ -7872,6 +7879,7 @@ impl eframe::App for App {
             self.settings_dialog(ctx);
             self.import_dialog(ctx);
             self.stats_dialog(ctx);
+            self.birthday_dialog(ctx);
         }
         if let Some((message, failed)) = self.roy_account.take_link_notice() {
             if failed {
@@ -7965,6 +7973,7 @@ impl eframe::App for App {
             return;
         }
         self.friends_tick();
+        self.notify_tick();
         self.player_bar(ctx);
         self.search_bar(ctx);
         if self.page == Page::Friends {

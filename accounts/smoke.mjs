@@ -54,6 +54,12 @@ test("profile details and avatar", async () => {
   me = (await request("/me", "PATCH", { display_name: "Roy" }, a.token)).account;
   assert.equal(me.bio, "Late night drives");
   await request("/me", "PATCH", {}, a.token, 400);
+  // Birthday: private to the owner, real dates only, and can be cleared.
+  assert.equal(a.account.birthday, "");
+  assert.equal((await request("/me", "PATCH", { birthday: "2000-02-29" }, a.token)).account.birthday, "2000-02-29");
+  await request("/me", "PATCH", { birthday: "2001-02-29" }, a.token, 400);
+  await request("/me", "PATCH", { birthday: "2999-01-01" }, a.token, 400);
+  assert.equal((await request("/me", "PATCH", { birthday: "" }, a.token)).account.birthday, "");
   await request("/me", "PATCH", { bio: "x".repeat(161) }, a.token, 400);
   await request("/me", "PATCH", { display_name: "bad\nname" }, a.token, 400);
 
@@ -188,6 +194,7 @@ test("friends, presence and direct messages", async () => {
   await request("/messages/" + b.account.id, "POST", { body: " " }, a.token, 400);
   await request("/messages/" + b.account.id, "POST", { body: "x".repeat(1001) }, a.token, 400);
   assert.equal((await request("/social", "GET", undefined, b.token)).unread[a.account.id], 2);
+  assert.equal((await request("/social", "GET", undefined, b.token)).latest[a.account.id], "again");
   const thread = (await request("/messages/" + a.account.id + "?read=1", "GET", undefined, b.token)).messages;
   assert.deepEqual(thread.map((m) => [m.body, m.mine]), [["hello", false], ["again", false]]);
   assert.equal((await request("/social", "GET", undefined, b.token)).unread[a.account.id], undefined);

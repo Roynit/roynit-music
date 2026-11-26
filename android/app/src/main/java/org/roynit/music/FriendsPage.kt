@@ -90,6 +90,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
     /** Called when the tab comes to the front or goes away. */
     fun visible(on: Boolean) {
         shown = on
+        if (!on) Notifier.chatOpenWith = null
         if (on) {
             mode = Mode.Friends
             if (Account.signedIn) {
@@ -172,6 +173,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
     // ---- screens ----
 
     private fun render() {
+        Notifier.chatOpenWith = if (mode == Mode.Chat && shown) chatWith?.optString("id") else null
         val chat = Account.signedIn && mode == Mode.Chat
         val profile = Account.signedIn && mode == Mode.Profile
         scroll.visibility = if (chat) GONE else VISIBLE
@@ -724,14 +726,28 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
         val name = input("Display name", text = me.optString("display_name"))
         val user = input("Username", text = me.optString("username"))
         val bio = input("Bio", text = me.optString("bio"))
+        var birthday = me.optString("birthday")
+        val pick = button(if (birthday.isEmpty()) "Add your birthday" else "Birthday: $birthday") {}
+        pick.setOnClickListener {
+            val now = java.util.Calendar.getInstance()
+            val old = birthday.split('-').mapNotNull { it.toIntOrNull() }
+            val (y, m, d) = if (old.size == 3) old else listOf(now.get(java.util.Calendar.YEAR) - 20, now.get(java.util.Calendar.MONTH) + 1, now.get(java.util.Calendar.DAY_OF_MONTH))
+            android.app.DatePickerDialog(c, { _, year, month, day ->
+                birthday = "%04d-%02d-%02d".format(year, month + 1, day)
+                pick.text = "Birthday: $birthday"
+            }, y, m - 1, d).apply { datePicker.maxDate = System.currentTimeMillis() }.show()
+        }
         val column = LinearLayout(c).apply {
             orientation = LinearLayout.VERTICAL
             addView(name, wide(0))
             addView(user, wide())
             addView(bio, wide())
+            addView(pick, wide())
+            addView(note("Only you see it. Roy Music wishes you a happy birthday on the day."), wide(6))
         }
         dialog("Edit profile", column, "Save") {
             val patch = JSONObject().put("display_name", name.text.toString().trim()).put("bio", bio.text.toString().trim())
+            if (birthday != me.optString("birthday")) patch.put("birthday", birthday)
             if (user.text.toString().trim().lowercase() != me.optString("username")) patch.put("username", user.text.toString().trim())
             Thread {
                 val reply = Account.call("PATCH", "/me", patch)

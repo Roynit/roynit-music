@@ -116,6 +116,7 @@ pub struct State {
     password: String,
     display_name: String,
     bio: String,
+    birthday: String,
     editing: bool,
     pending: Option<Pending>,
     pickup: Option<String>,
@@ -219,6 +220,7 @@ impl State {
             password: String::new(),
             display_name: String::new(),
             bio: String::new(),
+            birthday: String::new(),
             editing: false,
             pending: None,
             pickup: None,
@@ -326,6 +328,14 @@ impl State {
 
     pub(super) fn is_editing(&self) -> bool {
         self.editing && !self.profile.is_null()
+    }
+
+    pub(super) fn birthday(&self) -> &str {
+        self.profile["birthday"].as_str().unwrap_or_default()
+    }
+
+    pub(super) fn display_name(&self) -> &str {
+        self.profile["display_name"].as_str().unwrap_or_default()
     }
 
     pub(super) fn bio(&self) -> &str {
@@ -504,7 +514,7 @@ impl State {
     /// The edit boxes always start from what the server last said.
     fn sync_fields(&mut self) {
         let text = |key: &str| self.profile[key].as_str().unwrap_or_default().to_owned();
-        (self.display_name, self.bio) = (text("display_name"), text("bio"));
+        (self.display_name, self.bio, self.birthday) = (text("display_name"), text("bio"), text("birthday"));
     }
 
     /// Where this account's picture is served from; the version in the address changes with every upload.
@@ -1556,6 +1566,8 @@ impl App {
                             .small()
                             .color(MUTED),
                     );
+                    ui.add_space(6.);
+                    field(ui, "Birthday (year-month-day, only you see it)", &mut account.birthday, false, 10);
                 });
                 if !account.status.is_empty() {
                     let color = if account.error {
@@ -1587,7 +1599,7 @@ impl App {
                         {
                             account.request(
                             Action::Save,
-                            json!({"display_name":account.display_name.trim(),"bio":account.bio}),
+                            json!({"display_name":account.display_name.trim(),"bio":account.bio,"birthday":account.birthday.trim()}),
                         );
                         }
                         if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {

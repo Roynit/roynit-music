@@ -1,3 +1,9 @@
+# Roy Music 0.2.9
+
+- Notifications for new messages from friends, with a short "ting".
+- A good-morning wish each morning, and a happy-birthday wish (notification and a card in the app) on your birthday.
+- Add your birthday in your profile. Only you see it.
+
 # Roy Music 0.2.8
 
 - Dislike: a thumbs-down button next to the heart. A disliked song is never suggested, queued or mixed in again; its artist ranks lower and is left out only after repeated dislikes. Syncs with your account.
