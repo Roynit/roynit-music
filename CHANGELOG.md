@@ -1,3 +1,7 @@
+# Roy Music 0.3.5
+
+- Your profile shows real photos of your top artists instead of letters.
+
 # Roy Music 0.3.4
 
 - Updates are easy to find: a green bar across the top of the window when a new version exists, with Update now.

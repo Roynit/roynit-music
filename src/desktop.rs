@@ -284,6 +284,10 @@ struct App {
     update_dismissed: bool,
     /// A short answer to a manual "Check for updates" when there is nothing new.
     update_flash: Option<(String, std::time::Instant)>,
+    /// Photos of artists for the profile page, by artist name (an empty address = none found), and the names already asked for.
+    pub(crate) artist_pics: std::collections::HashMap<String, String>,
+    pub(crate) artist_pics_asked: std::collections::HashSet<String>,
+    pub(crate) artist_pic_queue: Vec<String>,
     background: bool,
     quiet_frames: u8,
     startup_supported: bool,
@@ -580,6 +584,9 @@ impl App {
             update_now: false,
             update_dismissed: false,
             update_flash: None,
+            artist_pics: Default::default(),
+            artist_pics_asked: Default::default(),
+            artist_pic_queue: Vec::new(),
             background,
             quiet_frames: if background && has_tray { 6 } else { 0 },
             startup_supported: riff_core::startup::is_installed_copy(),
@@ -1022,6 +1029,16 @@ impl App {
                         .collect(),
                 );
             }
+            tag if tag.starts_with("artistpic/") => {
+                let name = tag["artistpic/".len()..].to_owned();
+                let cover = data["items"]
+                    .as_array()
+                    .and_then(|items| items.iter().find(|item| item["kind"] == "artist"))
+                    .and_then(|item| item["cover"].as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                self.artist_pics.insert(name, cover);
+            }
             "open-artist" => {
                 self.busy = false;
                 let artist = data["items"].as_array().and_then(|items| items.iter().find(|item| item["kind"] == "artist")).cloned();
@@ -1203,6 +1220,7 @@ impl App {
                     }
                     Err(error)
                         if tag == "warm"
+                            || tag.starts_with("artistpic/")
                             || tag == "update-silent"
                             || tag == "update-auto"
                             || tag == "cancel"
@@ -1237,6 +1255,7 @@ impl App {
                                 self.mix_loading = false;
                                 self.mix_error = true;
                             } else if tag == "warm"
+                                || tag.starts_with("artistpic/")
                                 || tag == "update-silent"
                                 || tag == "update-auto"
                                 || self.current_tag(&tag) == Some("lyrics-words")
@@ -4858,6 +4877,9 @@ impl App {
         }
         let mut anchor = None;
         self.update_banner(ctx);
+        for name in std::mem::take(&mut self.artist_pic_queue) {
+            self.send(&format!("artistpic/{name}"), "job.submit", json!({"operation":"music.search","params":{"query":name,"filter":"artists"}}));
+        }
         egui::TopBottomPanel::top("search_bar")
             .frame(
                 egui::Frame::new()

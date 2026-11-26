@@ -520,11 +520,10 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
             })
         }
 
-        if (listening != null) card(
-            c.label(14f, Ui.MUTED, bold = true).apply { text = if (listening.optBoolean("playing")) "Listening to" else "Paused" },
-            c.label(16f, Color.WHITE, bold = true).apply { text = listening.optString("title"); setPadding(0, c.dp(6), 0, 0) },
-            c.label(14f, Ui.GREEN).apply { text = listening.optString("artist") },
-        ).apply { setOnClickListener { host.search("${listening.optString("title")} ${listening.optString("artist")}") } }
+        if (listening != null) card(listenCard(listening)).apply {
+            foreground = pressable()
+            setOnClickListener { host.search("${listening.optString("title")} ${listening.optString("artist")}") }
+        }
 
         fun date(seconds: Long) = java.text.SimpleDateFormat("d MMMM yyyy", java.util.Locale.getDefault()).format(java.util.Date(seconds * 1000))
         val bio = person.optString("bio").ifEmpty { info?.optString("bio").orEmpty() }
@@ -541,6 +540,82 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
         }
         card(*facts.toTypedArray())
         body.addView(View(c), LinearLayout.LayoutParams(1, c.dp(24)))
+    }
+
+
+    /** What a friend is playing, like the PC app's card: the cover, the song, a green "Listening on Roy Music" line and a moving progress bar. */
+    private fun listenCard(listening: JSONObject): View {
+        val playing = listening.optBoolean("playing")
+        val duration = listening.optDouble("duration", 0.0)
+        val start = listening.optDouble("position", 0.0)
+        val at = listening.optDouble("at", 0.0)
+        fun position(): Double {
+            val now = System.currentTimeMillis() / 1000.0
+            return (if (playing && at > 0) start + (now - at) else start).coerceIn(0.0, if (duration > 0) duration else start)
+        }
+        fun clock(seconds: Double) = "%d:%02d".format(seconds.toInt() / 60, seconds.toInt() % 60)
+
+        val cover = ImageView(c).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = roundRect(Ui.RAISED, c.dp(10))
+            clipRounded(c.dp(10))
+        }
+        Images.load(cover, listening.optString("cover").ifEmpty { null }, c.dp(64))
+        val status = LinearLayout(c).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(View(c).apply { background = roundRect(if (playing) Ui.GREEN else Ui.MUTED, c.dp(4)) }, LinearLayout.LayoutParams(c.dp(7), c.dp(7)).apply { marginEnd = c.dp(6) })
+            addView(c.label(12f, if (playing) Ui.GREEN else Ui.MUTED, bold = true).apply { text = if (playing) "Listening on Roy Music" else "Paused" })
+        }
+        val texts = LinearLayout(c).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(c.label(16f, Color.WHITE, bold = true).apply { text = listening.optString("title") })
+            addView(c.label(14f, Ui.MUTED).apply { text = listening.optString("artist") })
+            addView(status, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = c.dp(4) })
+        }
+        val top = LinearLayout(c).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(cover, LinearLayout.LayoutParams(c.dp(64), c.dp(64)))
+            addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = c.dp(14) })
+        }
+        val box = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL; addView(top) }
+        if (duration > 0) {
+            val done = View(c).apply { background = roundRect(Ui.GREEN, c.dp(2)) }
+            val rest = View(c).apply { background = roundRect(0x33FFFFFF, c.dp(2)) }
+            val bar = LinearLayout(c).apply {
+                addView(done, LinearLayout.LayoutParams(0, c.dp(4), 0f))
+                addView(rest, LinearLayout.LayoutParams(0, c.dp(4), 1f))
+            }
+            val elapsed = c.label(11f, Ui.MUTED).apply { text = clock(0.0) }
+            val times = LinearLayout(c).apply {
+                addView(elapsed, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                addView(c.label(11f, Ui.MUTED).apply { text = clock(duration) })
+            }
+            box.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = c.dp(14) })
+            box.addView(times, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = c.dp(4) })
+            fun refresh() {
+                val fraction = (position() / duration).coerceIn(0.0, 1.0).toFloat()
+                (done.layoutParams as LinearLayout.LayoutParams).weight = fraction
+                (rest.layoutParams as LinearLayout.LayoutParams).weight = 1f - fraction
+                bar.requestLayout()
+                elapsed.text = clock(position())
+            }
+            refresh()
+            if (playing) {
+                // Moves every second while the card is on screen.
+                val tick = object : Runnable {
+                    override fun run() {
+                        if (!box.isAttachedToWindow) return
+                        refresh()
+                        box.postDelayed(this, 1000)
+                    }
+                }
+                box.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                    override fun onViewAttachedToWindow(v: View) { v.postDelayed(tick, 1000) }
+                    override fun onViewDetachedFromWindow(v: View) {}
+                })
+            }
+        }
+        return box
     }
 
     private fun friendMenu(person: JSONObject, listening: JSONObject?) {

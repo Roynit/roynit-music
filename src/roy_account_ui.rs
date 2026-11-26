@@ -1900,6 +1900,14 @@ impl App {
         }
         let mut artists: Vec<_> = activity.into_iter().collect();
         artists.sort_by(|(a, left), (b, right)| right.cmp(left).then(a.cmp(b)));
+        let artists: Vec<(String, usize)> = artists.into_iter().take(6).map(|(a, n)| (a.to_owned(), n)).collect();
+        // Ask YouTube Music once for each artist's photo; the circles show the initials until it arrives.
+        for (artist, _) in &artists {
+            let name = artist.split(',').next().unwrap_or(artist).trim().to_owned();
+            if !name.is_empty() && self.artist_pics_asked.insert(name.clone()) {
+                self.artist_pic_queue.push(name);
+            }
+        }
 
         ui.horizontal(|ui| {
             if avatar(ui, account, 176., true).clicked() {
@@ -1947,21 +1955,26 @@ impl App {
             ui.label(RichText::new("Top artists lately").size(22.).bold());
             ui.add_space(8.);
             ui.horizontal_wrapped(|ui| {
-                for (artist, count) in artists.iter().take(6) {
+                for (artist, count) in artists.iter() {
                     ui.vertical(|ui| {
                         ui.set_width(128.);
                         let (rect, _) =
                             ui.allocate_exact_size(egui::vec2(120., 120.), egui::Sense::hover());
-                        ui.painter()
-                            .circle_filled(rect.center(), 60., tint_for(artist));
-                        ui.painter().text(
-                            rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            initials(artist),
-                            egui::FontId::proportional(40.),
-                            Color32::from_white_alpha(220),
-                        );
-                        ui.add(egui::Label::new(RichText::new(*artist).bold()).truncate());
+                        let key = artist.split(',').next().unwrap_or(artist).trim();
+                        match self.artist_pics.get(key).filter(|cover| !cover.is_empty()) {
+                            Some(cover) => Self::paint_cover(ui, rect, cover, 60.),
+                            None => {
+                                ui.painter().circle_filled(rect.center(), 60., tint_for(artist));
+                                ui.painter().text(
+                                    rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    initials(artist),
+                                    egui::FontId::proportional(40.),
+                                    Color32::from_white_alpha(220),
+                                );
+                            }
+                        }
+                        ui.add(egui::Label::new(RichText::new(artist.as_str()).bold()).truncate());
                         ui.label(
                             RichText::new(format!(
                                 "{count} {}",
