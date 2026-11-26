@@ -90,6 +90,10 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
     private var activeLine = -1
     private var plainLyrics = ""
 
+    /** Spotify shows the line being sung right under the cover, above the title. */
+    private val lyricTeaser = c.label(17f, Color.WHITE, bold = true, lines = 2).apply { visibility = View.GONE }
+    private var teaserLine = -2
+
     // Word mode: when a provider has word timings, the words of the line being sung light up one by one.
     private class LyricWord(val time: Double, val text: String)
     private val lyricWords = ArrayList<List<LyricWord>>()
@@ -171,7 +175,8 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
             setPadding(pad, 0, pad, c.dp(8))
             addView(top, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, c.dp(56)).apply { setMargins(-c.dp(12), 0, -c.dp(12), 0) })
             addView(cover, LinearLayout.LayoutParams(0, 0))
-            addView(info, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = c.dp(28) })
+            addView(lyricTeaser, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = c.dp(20) })
+            addView(info, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = c.dp(20) })
             addView(seek, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(-c.dp(8), c.dp(10), -c.dp(8), 0) })
             addView(times)
             addView(controls, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = c.dp(10) })
@@ -184,14 +189,14 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
             setPadding(c.dp(18), c.dp(16), c.dp(18), c.dp(18))
             addView(LinearLayout(c).apply {
                 gravity = Gravity.CENTER_VERTICAL
-                addView(c.label(16f, Color.WHITE, bold = true).apply { text = "Lyrics" }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                addView(c.label(12f, Color.WHITE, bold = true).apply {
-                    text = "Show more"
-                    background = roundRect(0x33000000, c.dp(14))
-                    setPadding(c.dp(12), c.dp(6), c.dp(12), c.dp(6))
-                })
+                addView(c.label(16f, Color.WHITE, bold = true).apply { text = "Lyrics preview" }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             })
-            addView(lyricPreview, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = c.dp(12) })
+            addView(lyricPreview, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = c.dp(14) })
+            addView(c.label(13f, Color.BLACK, bold = true).apply {
+                text = "Show lyrics"
+                background = roundRect(Color.WHITE, c.dp(16))
+                setPadding(c.dp(16), c.dp(8), c.dp(16), c.dp(8))
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = c.dp(16) })
             setOnClickListener { openLyrics() }
         }
         content.addView(lyricCard, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(c.dp(16), c.dp(8), c.dp(16), 0) })
@@ -330,6 +335,7 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
         plainLyrics = ""
         activeLine = -1
         drawLyricPreview()
+        updateTeaser()
         Thread {
             val reply = runCatching { JSONObject(Core.lyrics(song.title, song.artist, song.seconds.toDouble(), c.filesDir.path)) }.getOrDefault(JSONObject())
             val lines = reply.optJSONArray("lines")
@@ -352,6 +358,7 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
                 }
                 lyricsReady = true
                 drawLyricPreview()
+                updateTeaser()
                 if (lyricsPage.visibility == View.VISIBLE) redrawLyricsPage()
                 if (synced) fetchWords(song, lines!!)
             }
@@ -409,18 +416,44 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
     /** The card below the player: a few lines around the one being sung. */
     private fun drawLyricPreview() {
         lyricPreview.removeAllViews()
-        fun add(text: String, on: Boolean) = lyricPreview.addView(c.label(if (on) 19f else 17f, if (on) Color.WHITE else 0x99FFFFFF.toInt(), bold = true, lines = 3).apply {
+        // The line being sung is big and white; the ones after it fade away, like Spotify's preview.
+        fun add(text: String, rank: Int) = lyricPreview.addView(c.label(if (rank == 0) 22f else 19f, intArrayOf(Color.WHITE, 0xA0FFFFFF.toInt(), 0x70FFFFFF)[rank.coerceAtMost(2)], bold = true, lines = 3).apply {
             this.text = text
-            setPadding(0, c.dp(4), 0, c.dp(4))
+            setPadding(0, c.dp(6), 0, c.dp(6))
         })
         when {
-            !lyricsReady -> add("Looking for lyrics...", false)
+            !lyricsReady -> add("Looking for lyrics...", 1)
             lyricTexts.isNotEmpty() -> {
                 val now = activeLine.coerceAtLeast(0)
-                for (i in now until minOf(now + 4, lyricTexts.size)) add(lyricTexts[i], i == activeLine)
+                for (i in now until minOf(now + 3, lyricTexts.size)) add(lyricTexts[i], i - now)
             }
-            else -> add(plainLyrics.lineSequence().filter { it.isNotBlank() }.take(4).joinToString("\n").ifBlank { "No lyrics found for this song" }, false)
+            else -> add(plainLyrics.lineSequence().filter { it.isNotBlank() }.take(4).joinToString("\n").ifBlank { "No lyrics found for this song" }, 1)
         }
+    }
+
+    /** The line under the cover follows the song, fading from one line to the next. */
+    private fun updateTeaser() {
+        val text = lyricTexts.getOrNull(activeLine)
+        val show = text != null && text.isNotBlank()
+        val before = lyricTeaser.visibility
+        if (activeLine == teaserLine && (before == View.VISIBLE) == show) return
+        teaserLine = activeLine
+        if (!show) {
+            if (before != View.GONE) { lyricTeaser.visibility = View.GONE; sizeCover(width, height) }
+            return
+        }
+        if (before != View.VISIBLE) {
+            lyricTeaser.text = text
+            lyricTeaser.alpha = 0f
+            lyricTeaser.visibility = View.VISIBLE
+            sizeCover(width, height)
+            lyricTeaser.animate().alpha(1f).setDuration(200).start()
+            return
+        }
+        lyricTeaser.animate().alpha(0f).setDuration(90).withEndAction {
+            lyricTeaser.text = lyricTexts.getOrNull(activeLine).orEmpty()
+            lyricTeaser.animate().alpha(1f).setDuration(160).start()
+        }.start()
     }
 
     private fun followLyrics(position: Long) {
@@ -433,6 +466,7 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
         }
         activeLine = now
         sungWords = -1
+        updateTeaser()
         if (now >= 0 && now < lyricsList.childCount) {
             (lyricsList.getChildAt(now) as TextView).setTextColor(Color.WHITE)
             highlightWords()
@@ -497,7 +531,7 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
     private fun sizeCover(w: Int, h: Int) {
         if (w <= 0) return
         // As wide as the screen allows, but never so tall that the controls fall off the bottom of a short screen.
-        val side = minOf(w - c.dp(48), h - c.dp(445)).coerceAtLeast(c.dp(120))
+        val side = minOf(w - c.dp(48), h - c.dp(445) - (if (lyricTeaser.visibility == View.VISIBLE) c.dp(62) else 0)).coerceAtLeast(c.dp(120))
         val params = cover.layoutParams as LinearLayout.LayoutParams
         if (params.width != side || params.height != side) {
             params.width = side
