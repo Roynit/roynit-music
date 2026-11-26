@@ -1,3 +1,9 @@
+# Roy Music 0.2.8
+
+- Dislike: a thumbs-down button next to the heart. A disliked song is never suggested, queued or mixed in again; its artist ranks lower and is left out only after repeated dislikes. Syncs with your account.
+- Blend with a friend from the friend's menu, listening stats in the menu, podcasts in search, and artist names open the artist's page.
+- Fixed "Unknown track ID" when pressing the heart or dislike.
+
 # Roy Music 0.2.7
 
 - Friends: "People you may know" suggests friends of your friends, with one click to add.
