@@ -109,7 +109,7 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
     private val wordTick = object : Runnable {
         override fun run() {
             highlightWords()
-            if (lyricsPage.visibility == View.VISIBLE && wordMode && lyricWords.any { it.isNotEmpty() }) postDelayed(this, 80)
+            if (lyricsPage.visibility == View.VISIBLE && wordMode && lyricWords.any { it.isNotEmpty() }) postOnAnimation(this)
         }
     }
 
@@ -397,27 +397,52 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
     }
 
     /** Lights up the words of the line being sung that have started, leaving the rest dim. */
+    /** One letter's colour. Changing it only repaints, so the sweep can run every frame without laying the text out again. */
+    private class Glyph(var color: Int) : android.text.style.CharacterStyle() {
+        override fun updateDrawState(paint: android.text.TextPaint) { paint.color = color }
+    }
+    private var glyphs = emptyArray<Glyph>()
+    private var wordSpans = emptyList<Triple<Int, Int, Double>>() // start, end (in the line), time the word starts
+    private val dimInk = 0x66FFFFFF
+
+    private fun mix(from: Int, to: Int, t: Float): Int {
+        fun ch(shift: Int) = (((from shr shift) and 0xFF) + ((((to shr shift) and 0xFF) - ((from shr shift) and 0xFF)) * t)).toInt() shl shift
+        return ch(24) or ch(16) or ch(8) or ch(0)
+    }
+
+    /** Like the PC app: each word's letters light up in a smooth wave while the word is sung, not a whole word at a time. */
     private fun highlightWords() {
         if (!wordMode || activeLine !in 0 until lyricsList.childCount) return
         val words = lyricWords.getOrNull(activeLine)?.takeIf { it.isNotEmpty() } ?: return
-        val position = (Playback.controller?.currentPosition ?: return) / 1000.0
-        val sung = words.count { it.time <= position }
-        if (sung == sungWords) return
-        sungWords = sung
+        val view = lyricsList.getChildAt(activeLine) as TextView
         val line = lyricTexts[activeLine]
-        val text = android.text.SpannableString(line)
-        var cursor = 0
-        var split = 0
-        words.forEachIndexed { i, word ->
-            val at = line.indexOf(word.text.trim(), cursor)
-            if (at >= 0) {
-                cursor = at + word.text.trim().length
-                if (i < sung) split = cursor
+        if (sungWords == -1) {
+            sungWords = 0
+            var cursor = 0
+            wordSpans = words.mapNotNull { word ->
+                val text = word.text.trim()
+                val at = if (text.isEmpty()) -1 else line.indexOf(text, cursor)
+                if (at < 0) null else { cursor = at + text.length; Triple(at, cursor, word.time) }
+            }
+            glyphs = Array(line.length) { Glyph(dimInk) }
+            val spannable = android.text.SpannableString(line)
+            glyphs.forEachIndexed { i, g -> spannable.setSpan(g, i, i + 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) }
+            view.setText(spannable, TextView.BufferType.SPANNABLE)
+        }
+        val position = (Playback.controller?.currentPosition ?: return) / 1000.0
+        val lineEnd = lyricTimes.getOrNull(activeLine + 1)
+        for (g in glyphs) g.color = dimInk
+        wordSpans.forEachIndexed { i, (start, end, time) ->
+            val until = wordSpans.getOrNull(i + 1)?.third ?: lineEnd ?: (time + 0.45)
+            val progress = ((position - time) / (until - time).coerceAtLeast(0.08)).coerceIn(0.0, 1.0).toFloat()
+            val count = end - start
+            val sweep = progress * (count + 0.7f)
+            for (k in 0 until count) {
+                val a = if (progress >= 1f) 1f else ((sweep - k) / 1.7f).coerceIn(0f, 1f)
+                glyphs[start + k].color = mix(dimInk, Color.WHITE, a * a * (3f - 2f * a))
             }
         }
-        text.setSpan(android.text.style.ForegroundColorSpan(Color.WHITE), 0, split, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        text.setSpan(android.text.style.ForegroundColorSpan(0x66FFFFFF), split, line.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        (lyricsList.getChildAt(activeLine) as TextView).text = text
+        view.invalidate()
     }
 
     /** The card below the player: a few lines around the one being sung. */
@@ -468,16 +493,28 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
         val now = lyricTimes.indexOfLast { it * 1000 <= position }
         if (now == activeLine) return
         if (activeLine in 0 until lyricsList.childCount) {
-            (lyricsList.getChildAt(activeLine) as TextView).setTextColor(0x80FFFFFF.toInt())
+            (lyricsList.getChildAt(activeLine) as TextView).apply { setTextColor(0x80FFFFFF.toInt()); animate().scaleX(1f).scaleY(1f).setDuration(220).start() }
             showPlainActive()
         }
         activeLine = now
         sungWords = -1
         updateTeaser()
         if (now >= 0 && now < lyricsList.childCount) {
-            (lyricsList.getChildAt(now) as TextView).setTextColor(Color.WHITE)
+            (lyricsList.getChildAt(now) as TextView).apply {
+                setTextColor(Color.WHITE)
+                pivotX = 0f
+                pivotY = height / 2f
+                animate().scaleX(1.06f).scaleY(1.06f).setDuration(220).start()
+            }
             highlightWords()
-            if (lyricsPage.visibility == View.VISIBLE) lyricsScroll.smoothScrollTo(0, (lyricsList.getChildAt(now).top - lyricsScroll.height / 3).coerceAtLeast(0))
+            if (lyricsPage.visibility == View.VISIBLE) {
+                // A slow, soft glide to the new line instead of a quick jump.
+                val to = (lyricsList.getChildAt(now).top - lyricsScroll.height / 3).coerceAtLeast(0)
+                android.animation.ObjectAnimator.ofInt(lyricsScroll, "scrollY", lyricsScroll.scrollY, to).apply {
+                    duration = 600
+                    interpolator = android.view.animation.DecelerateInterpolator(1.6f)
+                }.start()
+            }
         }
         drawLyricPreview()
     }

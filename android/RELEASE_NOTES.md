@@ -1,4 +1,4 @@
 # Roy Music for Android
 
-- Dislike: a thumbs-down next to the heart. A disliked song is never suggested, queued or mixed in again.
-- Connect sheet, lyrics word by word, playlist import and friend suggestions.
+- Lyrics word by word now sweep letter by letter like the PC app, with a smoother glide between lines.
+- Dislike, Connect sheet, playlist import and friend suggestions from earlier versions.
