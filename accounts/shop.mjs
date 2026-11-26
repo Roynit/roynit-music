@@ -6,21 +6,21 @@ const DAY_OFFSET = 7 * 3600;
 export const dayOf = (seconds) => Math.floor((seconds + DAY_OFFSET) / 86400);
 const dayEnd = (day) => (day + 1) * 86400 - DAY_OFFSET;
 
-// Three quests a day, one of each difficulty, each claimable once. The most a person can earn in a day is 15 + 45 + 110.
+// Three quests a day, one of each difficulty, each claimable once. The most a person can earn in a day is 50 + 140 + 350.
 const POOL = {
   easy: [
-    {id: "min10", type: "minutes", target: 10, orbs: 15, title: "Listen for 10 minutes"},
-    {id: "songs3", type: "songs", target: 3, orbs: 15, title: "Play 3 different songs"},
+    {id: "min10", type: "minutes", target: 10, orbs: 50, title: "Listen for 10 minutes"},
+    {id: "songs3", type: "songs", target: 3, orbs: 50, title: "Play 3 different songs"},
   ],
   medium: [
-    {id: "min30", type: "minutes", target: 30, orbs: 40, title: "Listen for 30 minutes"},
-    {id: "songs8", type: "songs", target: 8, orbs: 40, title: "Play 8 different songs"},
-    {id: "artists4", type: "artists", target: 4, orbs: 45, title: "Hear 4 different artists"},
+    {id: "min30", type: "minutes", target: 30, orbs: 130, title: "Listen for 30 minutes"},
+    {id: "songs8", type: "songs", target: 8, orbs: 130, title: "Play 8 different songs"},
+    {id: "artists4", type: "artists", target: 4, orbs: 140, title: "Hear 4 different artists"},
   ],
   hard: [
-    {id: "min90", type: "minutes", target: 90, orbs: 100, title: "Listen for 90 minutes"},
-    {id: "songs15", type: "songs", target: 15, orbs: 100, title: "Play 15 different songs"},
-    {id: "artists8", type: "artists", target: 8, orbs: 110, title: "Hear 8 different artists"},
+    {id: "min90", type: "minutes", target: 90, orbs: 320, title: "Listen for 90 minutes"},
+    {id: "songs15", type: "songs", target: 15, orbs: 320, title: "Play 15 different songs"},
+    {id: "artists8", type: "artists", target: 8, orbs: 350, title: "Hear 8 different artists"},
   ],
 };
 const SONG_MIN = 20;          // seconds of a song before it counts as played
