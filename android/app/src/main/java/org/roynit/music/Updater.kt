@@ -65,7 +65,7 @@ object Updater {
     fun summary(notes: String): String {
         val clean = notes.lines().map { it.trim().replace(Regex("[*`#>]"), "").trim() }.filter { it.isNotEmpty() }
         val points = clean.filter { it.startsWith("-") || it.startsWith("•") }.map { it.trimStart('-', '•', ' ') }
-        return (points.ifEmpty { clean.take(1) }).take(4).joinToString("\n") { "• " + it.take(70) }
+        return (points.ifEmpty { clean.take(1) }).take(4).joinToString("\n") { "• " + if (it.length <= 70) it else it.take(70).substringBeforeLast(' ') + "…" }
     }
 
     /** Downloads the APK and checks its SHA-256. Returns the file, or null when anything is wrong. Worker thread. */
