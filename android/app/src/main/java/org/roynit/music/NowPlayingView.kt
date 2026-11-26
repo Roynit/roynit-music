@@ -596,8 +596,13 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
         val song = Playback.song
         title.text = song?.title.orEmpty()
         artist.text = song?.artist.orEmpty()
-        playingKind.text = if (Playback.sourceName.isEmpty()) "NOW PLAYING" else "PLAYING FROM"
-        playingFrom.text = Playback.sourceName.ifEmpty { song?.artist.orEmpty() }
+        val album = song?.album.orEmpty()
+        playingKind.text = when {
+            Playback.sourceName.isNotEmpty() -> "PLAYING FROM"
+            album.isNotEmpty() -> "PLAYING FROM ALBUM"
+            else -> "NOW PLAYING"
+        }
+        playingFrom.text = Playback.sourceName.ifEmpty { album.ifEmpty { song?.artist.orEmpty() } }
         if (song?.id != shownId) {
             shownId = song?.id
             Images.load(cover, song?.cover, c.dp(420)) { bitmap -> tint(Images.average(bitmap)) }
@@ -612,6 +617,7 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
         play.setImageResource(if (playing) R.drawable.ic_pause else R.drawable.ic_play)
         lyricPlay.setImageResource(if (playing) R.drawable.ic_pause else R.drawable.ic_play)
         shuffle.setColorFilter(if (controller.shuffleModeEnabled) Ui.GREEN else Color.WHITE)
+        prev.alpha = if (controller.hasPreviousMediaItem()) 1f else 0.4f
         repeat.setColorFilter(if (controller.repeatMode != Player.REPEAT_MODE_OFF) Ui.GREEN else Color.WHITE)
         repeat.alpha = if (controller.repeatMode == Player.REPEAT_MODE_ONE) 0.6f else 1f
         progress()
