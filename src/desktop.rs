@@ -3414,12 +3414,16 @@ impl App {
         } else {
             MUTED
         };
-        let center = rect.center();
-        ui.painter().circle_stroke(center, 8., egui::Stroke::new(1.8_f32, color));
-        ui.painter().line_segment(
-            [center + egui::vec2(-5.6, 5.6), center + egui::vec2(5.6, -5.6)],
-            egui::Stroke::new(1.8_f32, color),
-        );
+        // A thumb pointing down, drawn from points so it needs no emoji font: the hand, then the cuff.
+        let at = |x: f32, y: f32| rect.center() + egui::vec2((x - 12.) * 0.62, (y - 12.) * 0.62);
+        let stroke = egui::Stroke::new(1.6_f32, color);
+        let hand = [
+            (15., 3.), (6., 3.), (4.16, 4.22), (1.14, 11.27), (1., 12.), (1., 14.), (3., 16.), (9.31, 16.), (8.36, 20.57),
+            (8.4, 20.9), (8.8, 21.9), (9.83, 23.), (16.42, 16.41), (17., 15.), (17., 5.), (15., 3.),
+        ];
+        let outline: Vec<egui::Pos2> = hand.iter().map(|(x, y)| at(*x, *y)).collect();
+        ui.painter().add(egui::Shape::line(outline, stroke));
+        ui.painter().rect_stroke(egui::Rect::from_two_pos(at(19., 3.), at(23., 15.)), 1.0, stroke, egui::StrokeKind::Inside);
         response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, disliked, "Dislike"));
         let response = response.on_hover_text(if disliked {
             "Disliked: it will not be suggested. Click to undo"
