@@ -1127,10 +1127,7 @@ pub(super) fn paint_avatar(ui: &mut egui::Ui, account: &State, rect: egui::Rect)
         Color32::from_white_alpha(230),
     );
     if let Some(uri) = account.avatar_uri() {
-        egui::Image::new(uri)
-            .fit_to_exact_size(rect.size())
-            .corner_radius((rect.width() / 2.) as u8)
-            .paint_at(ui, rect);
+        super::App::paint_cover(ui, rect, &uri, (rect.width() / 2.) as u8);
     }
 }
 
@@ -1157,10 +1154,7 @@ fn avatar(ui: &mut egui::Ui, account: &State, size: f32, editable: bool) -> egui
         Color32::from_white_alpha(230),
     );
     if let Some(uri) = account.avatar_uri() {
-        egui::Image::new(uri)
-            .fit_to_exact_size(rect.size())
-            .corner_radius((size / 2.) as u8)
-            .paint_at(ui, rect);
+        super::App::paint_cover(ui, rect, &uri, (size / 2.) as u8);
     }
     if editable {
         let t =
@@ -1217,10 +1211,7 @@ pub(super) fn badge(ui: &mut egui::Ui, account: &State, rect: egui::Rect) -> egu
             Color32::from_white_alpha(230),
         );
         if let Some(uri) = account.avatar_uri() {
-            egui::Image::new(uri)
-                .fit_to_exact_size(inner.size())
-                .corner_radius((inner.width() / 2.) as u8)
-                .paint_at(ui, inner);
+            super::App::paint_cover(ui, inner, &uri, (inner.width() / 2.) as u8);
         }
     }
     response

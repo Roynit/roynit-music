@@ -241,6 +241,13 @@ test("friend suggestions: friends of friends, most shared first, never people yo
   await befriend(a, b); await befriend(b, c); await befriend(a, d); await befriend(d, c);
   const list = (await request("/friends/suggestions", "GET", undefined, a.token)).suggestions;
   assert.deepEqual(list.map((p) => [p.id, p.mutual]), [[c.account.id, 2]]);
+  // A profile card shows the friends you share; strangers' cards stay closed.
+  const card = await request("/people/" + c.account.id, "GET", undefined, a.token);
+  assert.equal(card.relation, "none");
+  assert.deepEqual(card.mutual.map((p) => p.id).sort(), [b.account.id, d.account.id].sort());
+  assert.equal((await request("/people/" + b.account.id, "GET", undefined, a.token)).relation, "friend");
+  const stranger = await make("se");
+  await request("/people/" + a.account.id, "GET", undefined, stranger.token, 403);
   // Once a request is out, they stop being suggested.
   await request("/friends/request", "POST", { username: c.account.username }, a.token);
   assert.deepEqual((await request("/friends/suggestions", "GET", undefined, a.token)).suggestions, []);

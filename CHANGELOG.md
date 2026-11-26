@@ -1,3 +1,8 @@
+# Roy Music 0.3.0
+
+- Friend profile cards show the friends you share, and since when you are friends.
+- Profile pictures are no longer stretched out of shape.
+
 # Roy Music 0.2.9
 
 - Notifications for new messages from friends, with a short "ting".

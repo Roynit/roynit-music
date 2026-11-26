@@ -649,6 +649,23 @@ async function socialRoute(request, env, user, path, url) {
     ).bind(user.id).all();
     return reply({suggestions:results.map((row) => ({...person(row), mutual:row.mutual}))});
   }
+  const profile = path.match(/^\/people\/([0-9a-f-]{36})$/);
+  if (profile && request.method === "GET") {
+    // Someone's profile card: friends, people with a pending request, and friends of your friends. Shows the friends you share.
+    await rate(env, request, "profile", 120, user.id);
+    const other = profile[1];
+    const row = await env.DB.prepare("SELECT id,username,display_name,bio,avatar_set,avatar_version,banner_set,banner_version,created_at FROM users WHERE id=?").bind(other).first();
+    if (!row) throw new HttpError(404, "Not found.");
+    const link = await friendship(env, user.id, other);
+    const mine = "SELECT CASE WHEN low=?1 THEN high ELSE low END AS id FROM friendships WHERE (low=?1 OR high=?1) AND status='accepted'";
+    const shared = (await env.DB.prepare(
+      "SELECT u.id,u.username,u.display_name,u.bio,u.avatar_set,u.avatar_version,u.banner_set,u.banner_version FROM users u "
+      + "WHERE u.id IN (" + mine + ") AND u.id IN (" + mine.replaceAll("?1", "?2") + ") ORDER BY u.display_name LIMIT 30"
+    ).bind(user.id, other).all()).results;
+    if (other !== user.id && !link && !shared.length) throw new HttpError(403, "You can only open the profile of people you know.");
+    const relation = other === user.id ? "me" : !link ? "none" : link.status === "accepted" ? "friend" : link.requester === user.id ? "outgoing" : "incoming";
+    return reply({...person(row), joined: row.created_at, friends_since: relation === "friend" ? link.created_at : null, relation, mutual: shared.map(person)});
+  }
   const taste = path.match(/^\/friends\/([0-9a-f-]{36})\/taste$/);
   if (taste && request.method === "GET") {
     // Blend: a friend's most-loved songs, so the app can mix them with yours. Friends only, and only when they allow it.

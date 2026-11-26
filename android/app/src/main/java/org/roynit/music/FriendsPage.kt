@@ -28,7 +28,7 @@ import java.io.ByteArrayOutputStream
  * what they are listening to, requests, chat, and your profile with picture, cover, status and Orbs.
  */
 class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
-    private enum class Mode { Friends, Profile, Chat }
+    private enum class Mode { Friends, Profile, Chat, Person }
 
     private val body = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
     private val scroll = ScrollView(context).apply { isVerticalScrollBarEnabled = false; addView(body) }
@@ -175,7 +175,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
     private fun render() {
         Notifier.chatOpenWith = if (mode == Mode.Chat && shown) chatWith?.optString("id") else null
         val chat = Account.signedIn && mode == Mode.Chat
-        val profile = Account.signedIn && mode == Mode.Profile
+        val profile = Account.signedIn && (mode == Mode.Profile || mode == Mode.Person)
         scroll.visibility = if (chat) GONE else VISIBLE
         chatRoot.visibility = if (chat) VISIBLE else GONE
         body.removeAllViews()
@@ -183,6 +183,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
         body.setPadding(if (profile) 0 else c.dp(20), if (profile) 0 else c.dp(16), if (profile) 0 else c.dp(20), c.dp(16))
         when {
             !Account.signedIn -> signInForm()
+            mode == Mode.Person -> drawPerson()
             profile -> drawProfile()
             chat -> drawChat()
             else -> drawFriends()
@@ -356,7 +357,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
         val outgoing = social.optJSONArray("outgoing")
         if (outgoing != null && outgoing.length() > 0) {
             section("Waiting for an answer")
-            for (i in 0 until outgoing.length()) row(outgoing.getJSONObject(i), "Request sent")
+            for (i in 0 until outgoing.length()) outgoing.getJSONObject(i).let { p -> row(p, "Request sent").apply { background = pressable(); setOnClickListener { openPerson(p) } } }
         }
     }
 
@@ -394,8 +395,149 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
         val unread = social.optJSONObject("unread")?.optInt(person.optString("id")) ?: 0
         row(person, line, badge = unread).apply {
             background = pressable()
-            setOnClickListener { friendMenu(person, listening) }
+            setOnClickListener { openPerson(person) }
         }
+    }
+
+    private var viewing: JSONObject? = null
+    private var details: JSONObject? = null
+
+    /** Opens someone's profile card: cover, picture, bio, the friends you share, and a Message button. */
+    private fun openPerson(person: JSONObject) {
+        viewing = person
+        details = null
+        mode = Mode.Person
+        render()
+        val id = person.optString("id")
+        Thread {
+            val reply = Account.call("GET", "/people/$id")
+            ui.post {
+                if (viewing?.optString("id") == id) {
+                    details = reply.takeIf { !it.has("error") }
+                    if (mode == Mode.Person) render()
+                }
+            }
+        }.start()
+    }
+
+    private fun drawPerson() {
+        val person = viewing ?: return
+        val info = details
+        val id = person.optString("id")
+        val name = person.optString("display_name")
+        val relation = info?.optString("relation") ?: if (social.optJSONArray("friends")?.let { list -> (0 until list.length()).any { list.getJSONObject(it).optString("id") == id } } == true) "friend" else "none"
+        val tint = intArrayOf(0xFF5B3A8E.toInt(), 0xFF8E3A5B.toInt(), 0xFF3A6E8E.toInt(), 0xFF8E6E3A.toInt(), 0xFF3A8E5B.toInt())[(name.hashCode() and 0x7fffffff) % 5]
+        val cover = ImageView(c).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = android.graphics.drawable.GradientDrawable(android.graphics.drawable.GradientDrawable.Orientation.TL_BR, intArrayOf(tint, 0xFF14141C.toInt()))
+        }
+        Account.bannerUrl(id, person.optInt("banner_version"))?.let { Images.load(cover, it, c.dp(480)) }
+        body.addView(FrameLayout(c).apply {
+            addView(cover, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, c.dp(130)))
+            addView(c.icon(R.drawable.ic_down, Color.WHITE, 40, 9).apply {
+                rotation = 90f
+                background = roundRect(0x99000000.toInt(), c.dp(20))
+                setOnClickListener { back() }
+            }, LayoutParams(c.dp(40), c.dp(40), Gravity.TOP or Gravity.START).apply { setMargins(c.dp(12), c.dp(12), 0, 0) })
+            if (relation == "friend") addView(c.icon(R.drawable.ic_more, Color.WHITE, 40, 9).apply {
+                background = roundRect(0x99000000.toInt(), c.dp(20))
+                setOnClickListener { friendMenu(person, person.optJSONObject("listening")) }
+            }, LayoutParams(c.dp(40), c.dp(40), Gravity.TOP or Gravity.END).apply { setMargins(0, c.dp(12), c.dp(12), 0) })
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        val listening = person.optJSONObject("listening")
+        val online = person.optBoolean("online")
+        val ring = FrameLayout(c).apply {
+            background = roundRect(Ui.BG, c.dp(52))
+            setPadding(c.dp(5), c.dp(5), c.dp(5), c.dp(5))
+            addView(avatar(name, Account.avatarUrl(id, person.optInt("avatar_version")), 86), LayoutParams(c.dp(86), c.dp(86)))
+            if (relation == "friend") addView(View(c).apply {
+                background = roundRect(if (online) 0xFF23A55A.toInt() else 0xFF80848E.toInt(), c.dp(10)).also { it.setStroke(c.dp(3), Ui.BG) }
+            }, LayoutParams(c.dp(24), c.dp(24), Gravity.BOTTOM or Gravity.END))
+        }
+        body.addView(ring, LinearLayout.LayoutParams(c.dp(96), c.dp(96)).apply { topMargin = -c.dp(46); marginStart = c.dp(14) })
+        body.addView(c.label(25f, Color.WHITE, bold = true).apply { text = name; setPadding(c.dp(18), c.dp(8), c.dp(18), 0) })
+        body.addView(c.label(14f, Ui.MUTED).apply { text = "@" + person.optString("username"); setPadding(c.dp(18), c.dp(2), c.dp(18), 0) })
+
+        // Message and the rest, like the buttons under a Discord profile.
+        fun wideButton(label: String, primary: Boolean, run: () -> Unit) = c.label(15f, if (primary) Color.BLACK else Color.WHITE, bold = true).apply {
+            text = label
+            gravity = Gravity.CENTER
+            background = roundRect(if (primary) Color.WHITE else Ui.SURFACE, c.dp(24))
+            setPadding(0, c.dp(13), 0, c.dp(13))
+            setOnClickListener { run() }
+        }
+        val actions = LinearLayout(c)
+        fun put(view: View) = actions.addView(view, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { if (actions.childCount > 0) marginStart = c.dp(10) })
+        when (relation) {
+            "friend" -> {
+                put(wideButton("Message", true) { chatWith = person; lastMessage = 0; mode = Mode.Chat; render(); loadChat(true) })
+                put(wideButton("Blend", false) { Blend.make(c as Activity, host, id, name) })
+            }
+            "incoming" -> {
+                put(wideButton("Accept", true) { answer(person, "accept"); mode = Mode.Friends; render() })
+                put(wideButton("Decline", false) { answer(person, "decline"); mode = Mode.Friends; render() })
+            }
+            "outgoing" -> put(wideButton("Request sent", false) {})
+            "none" -> put(wideButton("Add friend", true) {
+                Thread {
+                    val reply = Account.call("POST", "/friends/request", JSONObject().put("username", person.optString("username")))
+                    ui.post { if (!failed(reply)) c.say(if (reply.optBoolean("accepted")) "You are now friends" else "Request sent to $name"); loadFriends(); openPerson(person) }
+                }.start()
+            })
+        }
+        if (actions.childCount > 0) body.addView(actions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(c.dp(16), c.dp(14), c.dp(16), 0) })
+
+        // The friends you both have: little overlapping pictures and a count.
+        val mutual = info?.optJSONArray("mutual")
+        if (mutual != null && mutual.length() > 0) {
+            val people = (0 until mutual.length()).map { mutual.getJSONObject(it) }
+            val faces = LinearLayout(c)
+            people.take(4).forEachIndexed { i, p ->
+                faces.addView(FrameLayout(c).apply {
+                    background = roundRect(Ui.SURFACE, c.dp(15))
+                    setPadding(c.dp(2), c.dp(2), c.dp(2), c.dp(2))
+                    addView(avatar(p.optString("display_name"), Account.avatarUrl(p.optString("id"), p.optInt("avatar_version")), 26), LayoutParams(c.dp(26), c.dp(26)))
+                }, LinearLayout.LayoutParams(c.dp(30), c.dp(30)).apply { if (i > 0) marginStart = -c.dp(8) })
+            }
+            card(LinearLayout(c).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                background = pressable()
+                addView(faces)
+                addView(c.label(15f, Color.WHITE, bold = true).apply {
+                    text = if (people.size == 1) "1 mutual friend" else "${people.size} mutual friends"
+                    setPadding(c.dp(12), 0, 0, 0)
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                addView(c.label(18f, Ui.MUTED).apply { text = "›" })
+                setOnClickListener {
+                    Sheet.show(c as Activity, "Mutual friends", "You and $name", null, people.map { p ->
+                        Sheet.Option(p.optString("display_name") + "  @" + p.optString("username")) { openPerson(p) }
+                    })
+                }
+            })
+        }
+
+        if (listening != null) card(
+            c.label(14f, Ui.MUTED, bold = true).apply { text = if (listening.optBoolean("playing")) "Listening to" else "Paused" },
+            c.label(16f, Color.WHITE, bold = true).apply { text = listening.optString("title"); setPadding(0, c.dp(6), 0, 0) },
+            c.label(14f, Ui.GREEN).apply { text = listening.optString("artist") },
+        ).apply { setOnClickListener { host.search("${listening.optString("title")} ${listening.optString("artist")}") } }
+
+        fun date(seconds: Long) = java.text.SimpleDateFormat("d MMMM yyyy", java.util.Locale.getDefault()).format(java.util.Date(seconds * 1000))
+        val bio = person.optString("bio").ifEmpty { info?.optString("bio").orEmpty() }
+        val facts = ArrayList<View>()
+        facts += c.label(14f, Ui.MUTED, bold = true).apply { text = "About me" }
+        facts += c.label(15f, Color.WHITE, lines = 10).apply { text = bio.ifEmpty { "Nothing here yet." }; ellipsize = null; setPadding(0, c.dp(6), 0, c.dp(12)) }
+        if (info != null && info.optLong("joined") > 0) {
+            facts += c.label(14f, Ui.MUTED, bold = true).apply { text = "Member since" }
+            facts += c.label(15f, Color.WHITE).apply { text = date(info.optLong("joined")); setPadding(0, c.dp(6), 0, c.dp(12)) }
+        }
+        if (info != null && !info.isNull("friends_since") && info.optLong("friends_since") > 0) {
+            facts += c.label(14f, Ui.MUTED, bold = true).apply { text = "Friends since" }
+            facts += c.label(15f, Color.WHITE).apply { text = date(info.optLong("friends_since")); setPadding(0, c.dp(6), 0, 0) }
+        }
+        card(*facts.toTypedArray())
+        body.addView(View(c), LinearLayout.LayoutParams(1, c.dp(24)))
     }
 
     private fun friendMenu(person: JSONObject, listening: JSONObject?) {
@@ -417,7 +559,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
             addView(button("Accept", true) { answer(person, "accept") })
             addView(button("Decline") { answer(person, "decline") }, side(8))
         }
-        row(person, "@" + person.optString("username"), buttons)
+        row(person, "@" + person.optString("username"), buttons).apply { background = pressable(); setOnClickListener { openPerson(person) } }
     }
 
     /** Someone your friends know: one tap sends the request. */
@@ -433,7 +575,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
                 }
             }.start()
         }
-        row(person, line, add)
+        row(person, line, add).apply { background = pressable(); setOnClickListener { openPerson(person) } }
     }
 
     private fun answer(person: JSONObject, what: String) {
@@ -743,7 +885,7 @@ class FriendsPage(context: Context, host: SongHost) : Page(context, host) {
             addView(user, wide())
             addView(bio, wide())
             addView(pick, wide())
-            addView(note("Only you see it. Roy Music wishes you a happy birthday on the day."), wide(6))
+            addView(note("Only you see it."), wide(6))
         }
         dialog("Edit profile", column, "Save") {
             val patch = JSONObject().put("display_name", name.text.toString().trim()).put("bio", bio.text.toString().trim())

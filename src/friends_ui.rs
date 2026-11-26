@@ -39,10 +39,7 @@ fn paint_person(ui: &egui::Ui, rect: egui::Rect, name: &str, uri: Option<String>
         Color32::from_white_alpha(230),
     );
     if let Some(uri) = uri {
-        egui::Image::new(uri)
-            .fit_to_exact_size(rect.size())
-            .corner_radius((rect.width() / 2.) as u8)
-            .paint_at(ui, rect);
+        App::paint_cover(ui, rect, &uri, (rect.width() / 2.) as u8);
     }
     if let Some(online) = online {
         let at = rect.right_bottom() - egui::vec2(rect.width() * 0.14, rect.width() * 0.14);
@@ -602,6 +599,28 @@ impl App {
             if !person.bio.is_empty() {
                 ui.add_space(8.);
                 ui.add(egui::Label::new(RichText::new(&person.bio)).wrap());
+            }
+            self.social.want_person(&person.id);
+            if let Some(info) = self.social.people.get(&person.id).cloned() {
+                let mutual: Vec<String> = info["mutual"].as_array().map(|list| list.iter().filter_map(|p| p["display_name"].as_str().map(str::to_owned)).collect()).unwrap_or_default();
+                if !mutual.is_empty() {
+                    ui.add_space(8.);
+                    let shown = mutual.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+                    let more = if mutual.len() > 3 { format!(" +{}", mutual.len() - 3) } else { String::new() };
+                    ui.label(RichText::new(format!("{} mutual friend{}", mutual.len(), if mutual.len() == 1 { "" } else { "s" })).small().bold());
+                    ui.label(RichText::new(format!("{shown}{more}")).small().color(MUTED));
+                }
+                let date = |key: &str| info[key].as_i64().and_then(|s| Local.timestamp_opt(s, 0).single()).map(|d| d.format("%d %B %Y").to_string());
+                ui.add_space(8.);
+                if let Some(since) = date("friends_since") {
+                    ui.label(RichText::new("FRIENDS SINCE").small().bold().color(MUTED));
+                    ui.label(RichText::new(since).small());
+                }
+                if let Some(joined) = date("joined") {
+                    ui.add_space(4.);
+                    ui.label(RichText::new("MEMBER SINCE").small().bold().color(MUTED));
+                    ui.label(RichText::new(joined).small());
+                }
             }
             ui.add_space(12.);
             egui::Frame::new()

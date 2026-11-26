@@ -99,6 +99,7 @@ enum Tag {
     Send(String),
     Act(String),
     Taste(String),
+    Person(String),
 }
 
 type Reply = Result<Value, String>;
@@ -116,6 +117,9 @@ pub struct Social {
     /// A friend's favourite songs, fetched for Blend: the friend's name and the songs. The app takes it once.
     pub taste: Option<(String, Vec<Track>)>,
     pub unread: HashMap<String, u32>,
+    /// Profile details (friends you share, join dates) by person id, fetched once when a profile card opens.
+    pub people: HashMap<String, Value>,
+    people_asked: std::collections::HashSet<String>,
     /// The newest unread message of each friend, for the notification text.
     latest: HashMap<String, String>,
     /// How many unread messages each friend already rang for.
@@ -155,6 +159,8 @@ impl Social {
             suggestions: Vec::new(),
             taste: None,
             unread: HashMap::new(),
+            people: HashMap::new(),
+            people_asked: Default::default(),
             latest: HashMap::new(),
             rung: HashMap::new(),
             chats: HashMap::new(),
@@ -281,6 +287,13 @@ impl Social {
     /// Asks for what a friend loves most, so the app can blend it with your own music.
     pub fn fetch_taste(&mut self, id: &str, name: &str) {
         self.call(Tag::Taste(name.to_owned()), reqwest::Method::GET, format!("/friends/{id}/taste"), None);
+    }
+
+    /// Fetches someone's profile details the first time their card is shown.
+    pub fn want_person(&mut self, id: &str) {
+        if self.people_asked.insert(id.to_owned()) {
+            self.call(Tag::Person(id.to_owned()), reqwest::Method::GET, format!("/people/{id}"), None);
+        }
     }
 
     pub fn remove(&mut self, id: &str) {
@@ -460,6 +473,12 @@ impl Social {
                 }
             }
             (Tag::Taste(_), Err(error)) => self.notice = Some((error, true)),
+            (Tag::Person(id), Ok(data)) => {
+                self.people.insert(id, data);
+            }
+            (Tag::Person(id), Err(_)) => {
+                self.people_asked.remove(&id);
+            }
             (Tag::Act(_), Err(error)) => self.notice = Some((error, true)),
             // A refresh that fails just waits for the next one.
             (Tag::Social | Tag::Suggest | Tag::Chat(_) | Tag::Presence, _) => {}
