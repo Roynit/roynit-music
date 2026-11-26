@@ -90,6 +90,24 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
     private var activeLine = -1
     private var plainLyrics = ""
 
+    // Word mode: when a provider has word timings, the words of the line being sung light up one by one.
+    private class LyricWord(val time: Double, val text: String)
+    private val lyricWords = ArrayList<List<LyricWord>>()
+    private val prefs = c.getSharedPreferences("roy", android.content.Context.MODE_PRIVATE)
+    private var wordMode = prefs.getBoolean("lyric_words", true)
+    private var sungWords = -1
+    private val wordChip = c.label(12f, Color.WHITE, bold = true).apply {
+        text = "Words"
+        gravity = Gravity.CENTER
+        setPadding(c.dp(8), c.dp(6), c.dp(8), c.dp(6))
+    }
+    private val wordTick = object : Runnable {
+        override fun run() {
+            highlightWords()
+            if (lyricsPage.visibility == View.VISIBLE && wordMode && lyricWords.any { it.isNotEmpty() }) postDelayed(this, 80)
+        }
+    }
+
     init {
         setBackgroundColor(Ui.BG)
         visibility = GONE
@@ -233,7 +251,17 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
                 },
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
             )
-            addView(View(c), LinearLayout.LayoutParams(c.dp(48), 1))
+            addView(wordChip.apply {
+                alpha = if (wordMode) 1f else 0.5f
+                background = roundRect(0x33FFFFFF, c.dp(14))
+                setOnClickListener {
+                    wordMode = !wordMode
+                    prefs.edit().putBoolean("lyric_words", wordMode).apply()
+                    alpha = if (wordMode) 1f else 0.5f
+                    sungWords = -1
+                    if (wordMode) { removeCallbacks(wordTick); post(wordTick) } else showPlainActive()
+                }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
         val column = LinearLayout(c).apply {
             orientation = LinearLayout.VERTICAL
@@ -263,6 +291,8 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
         redrawLyricsPage()
         lyricsPage.alpha = 0f
         lyricsPage.visibility = View.VISIBLE
+        removeCallbacks(wordTick)
+        post(wordTick)
         lyricsPage.animate().alpha(1f).setDuration(200).withLayer().start()
     }
 
@@ -295,6 +325,8 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
         lyricsReady = false
         lyricTimes.clear()
         lyricTexts.clear()
+        lyricWords.clear()
+        sungWords = -1
         plainLyrics = ""
         activeLine = -1
         drawLyricPreview()
@@ -321,8 +353,57 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
                 lyricsReady = true
                 drawLyricPreview()
                 if (lyricsPage.visibility == View.VISIBLE) redrawLyricsPage()
+                if (synced) fetchWords(song, lines!!)
             }
         }.start()
+    }
+
+    /** Asks for word timings in the background; the lines show up as before and light up word by word once they arrive. */
+    private fun fetchWords(song: Song, lines: org.json.JSONArray) {
+        Thread {
+            val reply = runCatching { JSONObject(Core.lyricWords(song.title, song.artist, song.seconds.toDouble(), lines.toString())) }.getOrDefault(JSONObject())
+            val merged = reply.optJSONArray("lines") ?: return@Thread
+            val parsed = (0 until merged.length()).map { i ->
+                val words = merged.getJSONObject(i).optJSONArray("words")
+                (0 until (words?.length() ?: 0)).map { w -> words!!.getJSONObject(w).let { LyricWord(it.optDouble("time"), it.optString("text")) } }
+            }
+            post {
+                if (lyricsFor != song.id || parsed.none { it.isNotEmpty() }) return@post
+                lyricWords.clear()
+                lyricWords.addAll(parsed)
+                sungWords = -1
+                removeCallbacks(wordTick)
+                post(wordTick)
+            }
+        }.start()
+    }
+
+    private fun showPlainActive() {
+        if (activeLine in 0 until lyricsList.childCount && activeLine < lyricTexts.size) (lyricsList.getChildAt(activeLine) as TextView).text = lyricTexts[activeLine]
+    }
+
+    /** Lights up the words of the line being sung that have started, leaving the rest dim. */
+    private fun highlightWords() {
+        if (!wordMode || activeLine !in 0 until lyricsList.childCount) return
+        val words = lyricWords.getOrNull(activeLine)?.takeIf { it.isNotEmpty() } ?: return
+        val position = (Playback.controller?.currentPosition ?: return) / 1000.0
+        val sung = words.count { it.time <= position }
+        if (sung == sungWords) return
+        sungWords = sung
+        val line = lyricTexts[activeLine]
+        val text = android.text.SpannableString(line)
+        var cursor = 0
+        var split = 0
+        words.forEachIndexed { i, word ->
+            val at = line.indexOf(word.text.trim(), cursor)
+            if (at >= 0) {
+                cursor = at + word.text.trim().length
+                if (i < sung) split = cursor
+            }
+        }
+        text.setSpan(android.text.style.ForegroundColorSpan(Color.WHITE), 0, split, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        text.setSpan(android.text.style.ForegroundColorSpan(0x66FFFFFF), split, line.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        (lyricsList.getChildAt(activeLine) as TextView).text = text
     }
 
     /** The card below the player: a few lines around the one being sung. */
@@ -346,10 +427,15 @@ class NowPlayingView(context: Context, private val host: SongHost, private val o
         if (lyricTimes.isEmpty()) return
         val now = lyricTimes.indexOfLast { it * 1000 <= position }
         if (now == activeLine) return
-        if (activeLine in 0 until lyricsList.childCount) (lyricsList.getChildAt(activeLine) as TextView).setTextColor(0x80FFFFFF.toInt())
+        if (activeLine in 0 until lyricsList.childCount) {
+            (lyricsList.getChildAt(activeLine) as TextView).setTextColor(0x80FFFFFF.toInt())
+            showPlainActive()
+        }
         activeLine = now
+        sungWords = -1
         if (now >= 0 && now < lyricsList.childCount) {
             (lyricsList.getChildAt(now) as TextView).setTextColor(Color.WHITE)
+            highlightWords()
             if (lyricsPage.visibility == View.VISIBLE) lyricsScroll.smoothScrollTo(0, (lyricsList.getChildAt(now).top - lyricsScroll.height / 3).coerceAtLeast(0))
         }
         drawLyricPreview()

@@ -123,6 +123,24 @@ fn resolve_any(id: &str, title: &str, artist: &str, seconds: f64) -> Result<Valu
 }
 
 /// Lyrics for a song, from the first provider that has them: `{"lines":[{time,text,..}],"text"?,"instrumental"?}`.
+/// Word-by-word timings from a provider, merged into the lines the app already has (the same merge the PC app does).
+fn lyric_words(title: &str, artist: &str, seconds: f64, lines: &str) -> Result<Value> {
+    let mut ours: Vec<riff_core::lyrics::Line> = serde_json::from_str(lines)?;
+    // Real word timings when a provider has them; otherwise each line's words are spread over the time to the next line.
+    if let Ok(timed) = riff_core::lyrics::words_online(client()?, title, artist, seconds)
+        && let Ok(timed) = serde_json::from_value::<Vec<riff_core::lyrics::Line>>(timed["lines"].clone())
+    {
+        riff_core::lyrics::merge_word_timings(&mut ours, &timed);
+    }
+    let snapshot = ours.clone();
+    for (i, line) in ours.iter_mut().enumerate() {
+        if line.words.is_empty() {
+            line.words = riff_core::lyrics::estimate_word_timings(&snapshot[i], snapshot.get(i + 1), seconds);
+        }
+    }
+    Ok(json!({"lines": ours}))
+}
+
 /// `dir` is where found lyrics are kept so the next play needs no network.
 fn lyrics(title: &str, artist: &str, seconds: f64, dir: &str) -> Result<Value> {
     riff_core::lyrics::fetch(client()?, std::path::Path::new(dir), title, artist, seconds, true)
@@ -165,6 +183,19 @@ pub extern "system" fn Java_org_roynit_music_Core_home(mut env: JNIEnv, _: JClas
 pub extern "system" fn Java_org_roynit_music_Core_radio(mut env: JNIEnv, _: JClass, video_id: JString, limit: jni::sys::jint) -> jstring {
     let id = text(&mut env, video_id);
     reply(&mut env, answer(|| radio(&id, limit.clamp(1, 50) as usize)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_roynit_music_Core_lyricWords(
+    mut env: JNIEnv,
+    _: JClass,
+    title: JString,
+    artist: JString,
+    seconds: jni::sys::jdouble,
+    lines: JString,
+) -> jstring {
+    let (title, artist, lines) = (text(&mut env, title), text(&mut env, artist), text(&mut env, lines));
+    reply(&mut env, answer(|| lyric_words(&title, &artist, seconds, &lines)))
 }
 
 #[unsafe(no_mangle)]

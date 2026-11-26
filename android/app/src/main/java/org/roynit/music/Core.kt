@@ -21,6 +21,9 @@ object Core {
     /** `{"lines":[{"time":s,"text":"..."}],"text":"..."}` for a song, or `{"error":"..."}`. [dir] keeps found lyrics. */
     @JvmStatic external fun lyrics(title: String, artist: String, seconds: Double, dir: String): String
 
+    /** The same lines with a `words` list (time, end, text) on those a provider has word timings for. [lines] is the lines array as JSON. */
+    @JvmStatic external fun lyricWords(title: String, artist: String, seconds: Double, lines: String): String
+
     /** `{"mixes":[{name,tracks}],"picks":[...]}` made from a library snapshot (favourites and history). */
     @JvmStatic external fun mixes(library: String): String
 
