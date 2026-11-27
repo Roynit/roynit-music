@@ -220,11 +220,15 @@ object Library {
      * Adds what the cloud library has that this phone does not, the way the PC app does: nothing here is removed.
      * Only YouTube songs are taken, since those are the ones this app can play.
      */
-    fun mergeCloud(snapshot: JSONObject) {
+    fun mergeCloud(snapshot: JSONObject, base: JSONObject? = null) {
         val tracks = snapshot.optJSONObject("tracks") ?: return
         val songs = HashMap<String, Song>()
-        for (key in tracks.keys()) {
-            val t = tracks.optJSONObject(key) ?: continue
+        // The songs of the last synced copy too, so a song deleted elsewhere can still be found here.
+        val all = ArrayList<JSONObject>()
+        base?.optJSONObject("tracks")?.let { all += it }
+        all += tracks
+        for (source in all) for (key in source.keys()) {
+            val t = source.optJSONObject(key) ?: continue
             val platform = t.optString("platform")
             if (platform == "spotify") {
                 // A Spotify song plays from the matching recording on YouTube Music.
@@ -236,19 +240,29 @@ object Library {
             val video = android.net.Uri.parse(t.optString("source")).getQueryParameter("v") ?: continue
             songs[key] = Song(video, t.optString("title"), t.optString("artist"), t.str("cover").ifEmpty { "https://i.ytimg.com/vi/$video/mqdefault.jpg" }, t.optLong("duration"), key, t.str("album"), platform)
         }
-        val favs = snapshot.optJSONArray("favorites")
-        for (i in 0 until (favs?.length() ?: 0)) songs[favs!!.optString(i)]?.let { if (!isFavorite(it.id)) favorites += it }
+        fun ids(array: JSONArray?): List<String> = (0 until (array?.length() ?: 0)).map { array!!.optString(it) }
+        // In the last synced copy but not here: deleted here, so it is not brought back. In it but gone from the cloud:
+        // deleted on another device, so it goes here too.
+        val wasFavorite = ids(base?.optJSONArray("favorites")).toSet()
+        val nowFavorite = ids(snapshot.optJSONArray("favorites")).toSet()
+        for (key in nowFavorite) songs[key]?.let { if (!isFavorite(it.id) && key !in wasFavorite) favorites += it }
+        for (key in wasFavorite - nowFavorite) songs[key]?.let { s -> favorites.removeAll { it.id == s.id } }
         val rejected = snapshot.optJSONArray("dislikes")
         for (i in 0 until (rejected?.length() ?: 0)) songs[rejected!!.optString(i)]?.let { s -> if (!isDisliked(s.id)) dislikes += s; favorites.removeAll { it.id == s.id } }
         val lists = snapshot.optJSONObject("playlists")
+        val wasLists = base?.optJSONObject("playlists")
+        for (id in wasLists?.keys()?.asSequence()?.toList().orEmpty()) if (lists?.has(id) != true) playlists.removeAll { it.id == id }
         for (id in lists?.keys() ?: emptyList<String>().iterator()) {
             val p = lists!!.optJSONObject(id) ?: continue
-            val local = playlists.firstOrNull { it.id == id } ?: Playlist(p.optString("name"), id = id).also { playlists += it }
+            val was = wasLists?.optJSONObject(id)
+            val local = playlists.firstOrNull { it.id == id } ?: if (was != null) continue else Playlist(p.optString("name"), id = id).also { playlists += it }
+            val before = ids(was?.optJSONArray("tracks")).toSet()
+            val after = ids(p.optJSONArray("tracks")).toSet()
+            for (key in before - after) songs[key]?.let { s -> local.songs.removeAll { it.id == s.id } }
             // The newest change to the picture wins, whichever device made it.
             val version = p.optLong("cover")
             if (Math.abs(version) > Math.abs(local.cover)) local.cover = version
-            val ids = p.optJSONArray("tracks")
-            for (i in 0 until (ids?.length() ?: 0)) songs[ids!!.optString(i)]?.let { s -> if (local.songs.none { it.id == s.id }) local.songs += s }
+            for (key in after) songs[key]?.let { s -> if (key !in before && local.songs.none { it.id == s.id }) local.songs += s }
         }
         val past = snapshot.optJSONArray("history")
         val have = events.mapTo(HashSet()) { it.song.id to it.at }

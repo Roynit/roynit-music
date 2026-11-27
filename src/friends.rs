@@ -58,6 +58,18 @@ pub struct Message {
     pub at: i64,
     /// The message this one answers.
     pub reply: Option<Quote>,
+    /// A photo or voice message, when this is one.
+    pub media: Option<Media>,
+}
+
+/// A photo or a voice message in a conversation. The file is kept for 30 days; after that it is shown as expired.
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Media {
+    pub kind: String,
+    pub url: String,
+    pub seconds: i64,
+    pub expired: bool,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -355,7 +367,7 @@ impl Social {
         // Show it at once; the server's answer replaces this placeholder (its id is negative).
         let reply = chat.replying.take();
         let quote = reply.as_ref().map(|m| Quote { id: m.id, mine: m.mine, body: m.body.chars().take(120).collect() });
-        chat.messages.push(Message { id: -1, mine: true, body: body.clone(), at: now_seconds(), reply: quote });
+        chat.messages.push(Message { id: -1, mine: true, body: body.clone(), at: now_seconds(), reply: quote, media: None });
         chat.stick = true;
         let mut payload = json!({"body":body});
         if let Some(target) = reply.filter(|m| m.id > 0) {
@@ -385,6 +397,69 @@ impl Social {
             friend.quick = Some(emoji.to_owned());
         }
         self.call(Tag::React, reqwest::Method::PUT, format!("/messages/{id}/quick"), Some(json!({"emoji": emoji})));
+    }
+
+    /// Sends a photo: shrunk to 1280 px and saved as a JPEG under the server's limit, then added to the conversation.
+    pub fn send_photo(&mut self, id: &str, path: std::path::PathBuf, reply: Option<i64>) {
+        let Some(token) = self.token.clone() else {
+            return;
+        };
+        let mut address = format!("{}/messages/{id}/media?kind=image", self.endpoint);
+        if let Some(target) = reply.filter(|r| *r > 0) {
+            address.push_str(&format!("&reply_to={target}"));
+        }
+        let client = self.client.clone();
+        let (tx, rx) = mpsc::channel();
+        self.calls.push((Tag::Send(id.to_owned()), rx));
+        self.notice = Some(("Sending photo…".into(), false));
+        std::thread::spawn(move || {
+            let result = (|| {
+                let picture = image::open(&path).map_err(|_| "That file is not a supported picture.".to_owned())?;
+                let picture = if picture.width().max(picture.height()) > 1280 { picture.resize(1280, 1280, image::imageops::FilterType::Lanczos3) } else { picture };
+                let rgb = picture.to_rgb8();
+                let mut bytes = Vec::new();
+                for quality in [85, 72, 60, 48, 38] {
+                    bytes.clear();
+                    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality).encode_image(&rgb).map_err(|_| "Could not prepare that picture.".to_owned())?;
+                    if bytes.len() <= 440_000 {
+                        break;
+                    }
+                }
+                if bytes.len() > 440_000 {
+                    return Err("That picture is too detailed. Try a simpler one.".to_owned());
+                }
+                let response = client
+                    .post(address)
+                    .bearer_auth(token)
+                    .header("content-type", "image/jpeg")
+                    .body(bytes)
+                    .send()
+                    .map_err(|_| "Could not reach Roynit ID.".to_owned())?;
+                let status = response.status();
+                let data: Value = response.json().map_err(|_| "Roynit ID is unavailable right now.".to_owned())?;
+                if status.is_success() { Ok(data) } else { Err(data["error"].as_str().unwrap_or("That did not work.").to_owned()) }
+            })();
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Plays a voice message with the system's sound player: the file is fetched once into the temporary folder.
+    pub fn play_voice(&self, url: &str) {
+        use std::hash::{Hash, Hasher};
+        let (client, url) = (self.client.clone(), url.to_owned());
+        std::thread::spawn(move || {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            url.hash(&mut hasher);
+            let path = std::env::temp_dir().join(format!("roy-voice-{:x}.m4a", hasher.finish()));
+            if !path.is_file()
+                && let Ok(bytes) = client.get(&url).send().and_then(|r| r.error_for_status()).and_then(|r| r.bytes())
+            {
+                let _ = std::fs::write(&path, &bytes);
+            }
+            if path.is_file() {
+                let _ = open::that(&path);
+            }
+        });
     }
 
     pub fn open_chat(&mut self, id: &str) {

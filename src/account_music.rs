@@ -5,6 +5,28 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
+const BASE_KEY: &str = "cloud_base";
+
+/// What the cloud library held the last time this device synced: a song or playlist that is in it but gone from
+/// here was deleted here, and one that is in it but gone from the cloud was deleted elsewhere.
+#[derive(Default, Serialize, Deserialize)]
+struct Base {
+    favorites: Vec<String>,
+    playlists: BTreeMap<String, Vec<String>>,
+}
+impl Base {
+    fn of(snapshot: &Snapshot) -> Self {
+        Self {
+            favorites: snapshot.favorites.clone(),
+            playlists: snapshot
+                .playlists
+                .iter()
+                .map(|(id, p)| (id.clone(), p.tracks.clone()))
+                .collect(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Snapshot {
     pub tracks: BTreeMap<String, Track>,
@@ -135,10 +157,47 @@ impl Snapshot {
             .retain(|event| self.tracks.contains_key(&event.track_id));
     }
 
+    /// Remembers a snapshot as what the cloud holds, after uploading it.
+    pub fn remember(&self, library: &mut Library) {
+        library.settings.insert(
+            BASE_KEY.into(),
+            serde_json::to_value(Base::of(self)).unwrap_or_default(),
+        );
+    }
+
     pub fn merge_into(mut self, library: &mut Library) {
         self.tracks
             .retain(|id, track| id == &track.id && Self::online(track));
         self.retain_references();
+        let synced = Base::of(&self);
+        let base: Option<Base> = library
+            .settings
+            .get(BASE_KEY)
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        if let Some(base) = &base {
+            // Deleted elsewhere: it was in the last synced copy and the cloud no longer has it.
+            let cloud: HashSet<_> = self.favorites.iter().collect();
+            let gone: HashSet<_> = base.favorites.iter().filter(|id| !cloud.contains(id)).collect();
+            library.favorites.retain(|id| !gone.contains(id));
+            library
+                .playlists
+                .retain(|id, _| !base.playlists.contains_key(id) || self.playlists.contains_key(id));
+            for (id, was) in &base.playlists {
+                if let (Some(now), Some(local)) = (self.playlists.get(id), library.playlists.get_mut(id)) {
+                    let now: HashSet<_> = now.tracks.iter().collect();
+                    local.tracks.retain(|t| !was.contains(t) || now.contains(t));
+                }
+            }
+            // Deleted here: it was in the last synced copy and is missing now, so do not bring it back.
+            let mine: HashSet<_> = library.favorites.iter().cloned().collect();
+            self.favorites.retain(|id| mine.contains(id) || !base.favorites.contains(id));
+            self.playlists.retain(|id, _| library.playlists.contains_key(id) || !base.playlists.contains_key(id));
+            for (id, playlist) in self.playlists.iter_mut() {
+                if let (Some(was), Some(local)) = (base.playlists.get(id), library.playlists.get(id)) {
+                    playlist.tracks.retain(|t| local.tracks.contains(t) || !was.contains(t));
+                }
+            }
+        }
         for (id, track) in self.tracks {
             library
                 .tracks
@@ -179,5 +238,8 @@ impl Snapshot {
                 .filter(|event| seen.insert((event.track_id.clone(), event.started_at))),
         );
         library.history.sort_by_key(|event| event.started_at);
+        library
+            .settings
+            .insert(BASE_KEY.into(), serde_json::to_value(synced).unwrap_or_default());
     }
 }

@@ -1028,6 +1028,7 @@ impl App {
                         }
                         let column = if message.mine { egui::Layout::top_down(egui::Align::Max) } else { egui::Layout::top_down(egui::Align::Min) };
                         ui.with_layout(column, |ui| {
+                            let mut voice: Option<String> = None;
                             ui.spacing_mut().item_spacing.y = 2.;
                             if let Some(quote) = &message.reply {
                                 let who = if message.mine { "You" } else { name.as_str() };
@@ -1043,7 +1044,8 @@ impl App {
                                     ui.add(egui::Label::new(RichText::new(plain(&quote.body)).small().color(MUTED)).truncate());
                                 });
                             }
-                            let frame = if emoji_only {
+                            let photo = message.media.as_ref().is_some_and(|m| m.kind == "image" && !m.expired);
+                            let frame = if emoji_only || photo {
                                 egui::Frame::new().inner_margin(egui::Margin::symmetric(2, 0))
                             } else {
                                 egui::Frame::new()
@@ -1054,12 +1056,40 @@ impl App {
                             let bubble = frame
                                 .show(ui, |ui| {
                                     ui.set_max_width((width * 0.7).max(160.));
-                                    let text = RichText::new(plain(&message.body));
-                                    ui.add(egui::Label::new(if emoji_only { text.size(34.) } else { text }).wrap().selectable(false));
+                                    match &message.media {
+                                        Some(media) if media.expired => {
+                                            let what = if media.kind == "image" { "Photo" } else { "Voice message" };
+                                            ui.label(RichText::new(format!("{what} expired")).color(MUTED));
+                                        }
+                                        Some(media) if media.kind == "image" => {
+                                            ui.add(egui::Image::new(media.url.as_str()).max_width(260.).corner_radius(14));
+                                        }
+                                        Some(media) => {
+                                            ui.horizontal(|ui| {
+                                                if ui.add(egui::Button::new(RichText::new("▶").size(16.)).corner_radius(16)).on_hover_text("Play").clicked() {
+                                                    voice = Some(media.url.clone());
+                                                }
+                                                ui.label(RichText::new(format!("Voice message  {}:{:02}", media.seconds / 60, media.seconds % 60)).bold());
+                                            });
+                                        }
+                                        None => {
+                                            let text = RichText::new(plain(&message.body));
+                                            ui.add(egui::Label::new(if emoji_only { text.size(34.) } else { text }).wrap().selectable(false));
+                                        }
+                                    }
                                 })
                                 .response
                                 .interact(egui::Sense::click())
                                 .on_hover_text("Right-click to react or reply");
+                            if photo
+                                && bubble.clicked()
+                                && let Some(media) = &message.media
+                            {
+                                let _ = open::that(&media.url);
+                            }
+                            if let Some(url) = voice.take() {
+                                self.social.play_voice(&url);
+                            }
                             bubble.context_menu(|ui| {
                                 ui.horizontal(|ui| {
                                     for e in QUICK {
@@ -1121,6 +1151,7 @@ impl App {
             });
         }
         let mut send = false;
+        let mut pick_photo = false;
         ui.add_space(6.);
         ui.horizontal(|ui| {
             egui::Frame::new()
@@ -1143,6 +1174,9 @@ impl App {
                         if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             send = true;
                             field.request_focus();
+                        }
+                        if ui.add(egui::Button::new(RichText::new("Photo").small().color(MUTED)).frame(false)).on_hover_text("Send a photo").clicked() {
+                            pick_photo = true;
                         }
                         egui::containers::menu::MenuButton::new(RichText::new("☺").size(20.).color(MUTED))
                             .config(egui::containers::menu::MenuConfig::default().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
@@ -1197,6 +1231,12 @@ impl App {
         });
         if send {
             self.social.send(&id);
+        }
+        if pick_photo
+            && let Some(path) = rfd::FileDialog::new().add_filter("Pictures", &["jpg", "jpeg", "png", "webp"]).pick_file()
+        {
+            let reply = self.social.chats.get_mut(&id).and_then(|c| c.replying.take()).map(|m| m.id);
+            self.social.send_photo(&id, path, reply);
         }
     }
 }

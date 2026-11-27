@@ -8041,6 +8041,11 @@ impl eframe::App for App {
                 roy_account_ui::Event::PlaylistCover { id, version } => {
                     self.send("playlist", "playlist.cover", json!({"id":id,"cover":version}))
                 }
+                roy_account_ui::Event::Base(snapshot) => self.send(
+                    "account-based",
+                    "account.music.base",
+                    json!({"snapshot":snapshot}),
+                ),
                 roy_account_ui::Event::Merge(snapshot) => self.send(
                     "account-merged",
                     "account.music.merge",

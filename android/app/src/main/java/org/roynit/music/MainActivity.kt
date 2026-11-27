@@ -290,6 +290,12 @@ class MainActivity : Activity(), SongHost {
         @Suppress("DEPRECATION") super.onActivityResult(requestCode, resultCode, data)
         if ((requestCode == 11 || requestCode == 12) && resultCode == RESULT_OK) data?.data?.let(friends::picked)
         if (requestCode == 13 && resultCode == RESULT_OK) data?.data?.let(library::coverPicked)
+        if (requestCode == 14 || requestCode == 15) chat.onActivityResult(requestCode, resultCode, data)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 21 || requestCode == 22) chat.onPermissionResult(requestCode, grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED)
     }
 
     private lateinit var miniFill: View

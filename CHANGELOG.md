@@ -1,3 +1,9 @@
+# Roy Music 0.3.8
+
+- Deleted songs and playlists stay deleted: sync now notices what you removed, here or on another device, instead of bringing it back.
+- Chat shows photos sent from the phone, and photos sent together appear as one block.
+- Send a photo from the PC with the new Photo button. Photos and voice messages disappear after 30 days.
+
 # Roy Music 0.3.7
 
 - Give a playlist its own picture: right-click it in the sidebar and choose Change picture. It is kept on your account, so your phone shows it too.

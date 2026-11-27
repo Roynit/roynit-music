@@ -556,3 +556,40 @@ test("playlist covers: a picture per playlist that follows the library, validate
   assert.ok((await gone.json()).version < 0, "taking it away is a negative version");
   assert.equal((await fetch(base + "/playlist-cover/" + a.account.id + "/list-aaaa1111")).status, 404);
 });
+
+test("chat media: photos and voice messages are checked, stored, shown in the chat and fetched by their key", async () => {
+  const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
+  const password = "local-" + crypto.randomUUID();
+  const make = (tag) => request("/register", "POST", { email: tag + nonce + "@example.test", username: tag + "_" + nonce, password });
+  const [a, b, c] = [await make("ma"), await make("mb"), await make("mc")];
+  await request("/friends/request", "POST", { username: b.account.username }, a.token);
+  await request("/friends/accept", "POST", { id: a.account.id }, b.token);
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 9, 8, 7, 6]);
+  const m4a = new Uint8Array([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x4d, 0x34, 0x41, 0x20, 1, 2, 3, 4]);
+  const send = (to, query, body, type, token = a.token) => fetch(base + "/messages/" + to + "/media" + query, { method: "POST", headers: { authorization: "Bearer " + token, "content-type": type }, body });
+  const photo = await send(b.account.id, "?kind=image", png, "image/png");
+  assert.equal(photo.status, 200);
+  const sent = await photo.json();
+  assert.equal(sent.media.kind, "image");
+  assert.equal(sent.body, "📷 Photo");
+  const file = await fetch(sent.media.url.replace("https://roynit.dangz.org/api/account", base));
+  assert.equal(file.status, 200);
+  assert.equal(file.headers.get("content-type"), "image/png");
+  assert.deepEqual(new Uint8Array(await file.arrayBuffer()), png);
+  assert.equal((await send(b.account.id, "?kind=image", new Uint8Array([1, 2, 3, 4]), "image/png")).status, 400, "bytes must look like a photo");
+  assert.equal((await send(b.account.id, "?kind=voice", m4a, "audio/mp4")).status, 400, "a voice message needs its length");
+  assert.equal((await send(b.account.id, "?kind=voice&seconds=5", png, "audio/mp4")).status, 400, "bytes must look like sound");
+  assert.equal((await send(b.account.id, "?kind=video", png, "image/png")).status, 400);
+  assert.equal((await send(a.account.id, "?kind=image", png, "image/png", c.token)).status, 403, "only friends");
+  assert.equal((await send(b.account.id, "?kind=image", new Uint8Array(500_000).fill(1), "image/png")).status, 413, "too big");
+  const voice = await (await send(b.account.id, "?kind=voice&seconds=7", m4a, "audio/mp4")).json();
+  assert.equal(voice.media.seconds, 7);
+  const chat = await request("/messages/" + a.account.id, "GET", undefined, b.token);
+  assert.deepEqual(chat.messages.map((m) => m.media?.kind), ["image", "voice"]);
+  assert.equal(chat.messages[0].media.expired, false);
+  assert.equal((await fetch(base + "/media/" + "0".repeat(32))).status, 404);
+  assert.ok([401, 404].includes((await fetch(base + "/media/not-a-key")).status));
+  // taking the friend away takes the files too
+  await request("/friends/" + a.account.id, "DELETE", undefined, b.token);
+  assert.equal((await fetch(sent.media.url.replace("https://roynit.dangz.org/api/account", base))).status, 404);
+});

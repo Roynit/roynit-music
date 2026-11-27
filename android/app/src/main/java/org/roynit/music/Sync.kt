@@ -129,8 +129,9 @@ object Sync {
         revision = reply.optInt("revision")
         val snapshot = reply.optJSONObject("snapshot")
         if (snapshot != null) {
+            val base = cloud
             cloud = snapshot
-            main.post { Library.mergeCloud(snapshot) }
+            main.post { Library.mergeCloud(snapshot, base) }
             save()
         }
         return null

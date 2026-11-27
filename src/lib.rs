@@ -2224,6 +2224,12 @@ impl Engine {
                 self.store.save()?;
                 Ok(json!(true))
             }
+            "account.music.base" => {
+                let sent: account_music::Snapshot = serde_json::from_value(p["snapshot"].clone())?;
+                sent.remember(&mut self.store.data);
+                self.store.save()?;
+                Ok(json!(true))
+            }
             "account.music.merge" => {
                 let incoming: account_music::Snapshot = serde_json::from_value(p["snapshot"].clone())?;
                 incoming.merge_into(&mut self.store.data);

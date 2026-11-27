@@ -535,6 +535,23 @@ async function passwordReset(request, env) {
   return session(env, updated);
 }
 // ---- Friends, presence and direct messages ----
+// Photos and voice messages are kept for 30 days: the bucket's lifecycle rule removes the files, and a message older than
+// that is shown as expired.
+const MEDIA_DAYS = 30;
+const MEDIA_QUOTA = 200 * 1024 * 1024;
+const MEDIA_LIMITS = {image: 450_000, voice: 700_000};
+const MEDIA_WORDS = {image: "📷 Photo", voice: "🎤 Voice message"};
+const mediaOf = (env, row) => row.media_key ? {kind:row.media_type, url:env.PUBLIC_BASE + "/media/" + row.media_key, seconds:row.media_seconds || 0,
+  expired:row.created_at < now() - MEDIA_DAYS * 86400} : null;
+// Trust the bytes, not the header, for sound as well.
+function voiceMatches(type, data) {
+  const at = (offset, text) => [...text].every((c, i) => data[offset + i] === c.charCodeAt(0));
+  if (type === "audio/mp4" || type === "audio/x-m4a") return at(4, "ftyp");
+  if (type === "audio/ogg") return at(0, "OggS");
+  if (type === "audio/webm") return data[0] === 0x1a && data[1] === 0x45 && data[2] === 0xdf && data[3] === 0xa3;
+  if (type === "audio/aac") return data[0] === 0xff && (data[1] & 0xf0) === 0xf0;
+  return type === "audio/mpeg" && (at(0, "ID3") || (data[0] === 0xff && (data[1] & 0xe0) === 0xe0));
+}
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ONLINE_FOR = 75;
 const pairOf = (a, b) => a < b ? [a, b] : [b, a];
@@ -657,6 +674,11 @@ async function socialRoute(request, env, user, path, url) {
   if (removal && request.method === "DELETE") {
     if (!uuidPattern.test(removal[1])) throw new HttpError(404, "Not found.");
     const [low, high] = pairOf(user.id, removal[1]);
+    // The conversation's photos and voice messages go with it.
+    if (env.MEDIA) {
+      const files = await env.DB.prepare("SELECT media_key FROM messages WHERE low=? AND high=? AND media_key IS NOT NULL").bind(low, high).all();
+      if (files.results.length) await env.MEDIA.delete(files.results.map((f) => "chat/" + f.media_key));
+    }
     await env.DB.batch([
       env.DB.prepare("DELETE FROM friendships WHERE low=? AND high=?").bind(low, high),
       env.DB.prepare("DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE low=? AND high=?)").bind(low, high),
@@ -728,7 +750,7 @@ async function socialRoute(request, env, user, path, url) {
     if (request.method === "GET") {
       const after = Number.parseInt(url.searchParams.get("after") || "0", 10) || 0;
       const {results} = await env.DB.prepare(
-        "SELECT m.id,m.sender,m.body,m.created_at,m.reply_to,r.sender AS reply_sender,r.body AS reply_body FROM messages m LEFT JOIN messages r ON r.id=m.reply_to "
+        "SELECT m.id,m.sender,m.body,m.created_at,m.reply_to,m.media_key,m.media_type,m.media_seconds,r.sender AS reply_sender,r.body AS reply_body FROM messages m LEFT JOIN messages r ON r.id=m.reply_to "
         + "WHERE m.low=? AND m.high=? AND m.id>? ORDER BY m.id DESC LIMIT 100"
       ).bind(low, high, after).all();
       if (url.searchParams.get("read") === "1") {
@@ -744,7 +766,7 @@ async function socialRoute(request, env, user, path, url) {
       const pair = await friendship(env, user.id, chat[1]);
       return reply({
         quick:pair?.quick_icon || null,
-        messages:results.reverse().map((m) => ({id:m.id, mine:m.sender === user.id, body:m.body, at:m.created_at,
+        messages:results.reverse().map((m) => ({id:m.id, mine:m.sender === user.id, body:m.body, at:m.created_at, media:mediaOf(env, m),
           reply:m.reply_to ? {id:m.reply_to, mine:m.reply_sender === user.id, body:(m.reply_body || "").slice(0, 120)} : null})),
         reactions,
       });
@@ -763,6 +785,35 @@ async function socialRoute(request, env, user, path, url) {
       const row = await env.DB.prepare("INSERT INTO messages(low,high,sender,body,created_at,reply_to) VALUES (?,?,?,?,?,?) RETURNING id,created_at").bind(low, high, user.id, body, now(), replyTo).first();
       return reply({id:row.id, mine:true, body, at:row.created_at, reply:null});
     }
+  }
+  const media = path.match(/^\/messages\/([0-9a-f-]{36})\/media$/);
+  if (media && request.method === "POST") {
+    await rate(env, request, "media", 60, user.id);
+    await requireFriend(env, user.id, media[1]);
+    if (!env.MEDIA) throw new HttpError(503, "Photos and voice messages are not available right now.");
+    const [low, high] = pairOf(user.id, media[1]);
+    const kind = url.searchParams.get("kind");
+    if (!(kind in MEDIA_LIMITS)) throw new HttpError(400, "Send a photo or a voice message.");
+    const type = (request.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    const data = await bytes(request, MEDIA_LIMITS[kind]);
+    if (!data.length || (kind === "image" ? !imageMatches(type, data) : !voiceMatches(type, data))) {
+      throw new HttpError(400, kind === "image" ? "Use a JPEG, PNG or WebP photo under 450 KB." : "That sound could not be read.");
+    }
+    const seconds = Math.min(180, Math.max(0, Math.round(Number(url.searchParams.get("seconds")) || 0)));
+    if (kind === "voice" && !seconds) throw new HttpError(400, "A voice message needs its length.");
+    const used = await env.DB.prepare("SELECT COALESCE(SUM(media_size),0) AS n FROM messages WHERE sender=? AND media_key IS NOT NULL AND created_at>?").bind(user.id, now() - MEDIA_DAYS * 86400).first();
+    if (used.n + data.length > MEDIA_QUOTA) throw new HttpError(413, "You have used up your space for photos and voice messages. Older ones expire after " + MEDIA_DAYS + " days.");
+    let replyTo = null;
+    const wanted = Number(url.searchParams.get("reply_to"));
+    if (wanted) {
+      const target = await env.DB.prepare("SELECT id FROM messages WHERE id=? AND low=? AND high=?").bind(wanted, low, high).first();
+      if (target) replyTo = target.id;
+    }
+    const key = crypto.randomUUID().replaceAll("-", "");
+    await env.MEDIA.put("chat/" + key, data, {httpMetadata:{contentType:type}});
+    const row = await env.DB.prepare("INSERT INTO messages(low,high,sender,body,created_at,reply_to,media_key,media_type,media_seconds,media_size) VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id,created_at,media_key,media_type,media_seconds")
+      .bind(low, high, user.id, MEDIA_WORDS[kind], now(), replyTo, key, kind, seconds, data.length).first();
+    return reply({id:row.id, mine:true, body:MEDIA_WORDS[kind], at:row.created_at, media:mediaOf(env, row), reply:null});
   }
   const quick = path.match(/^\/messages\/([0-9a-f-]{36})\/quick$/);
   if (quick && request.method === "PUT") {
@@ -819,6 +870,15 @@ async function route(request, env, ctx) {
   if (request.method==="POST" && path==="/google/start") return googleBegin(request,env);
   if (request.method==="POST" && path==="/google/pickup") return googlePickup(request,env);
   if (request.method==="GET" && path==="/google/callback") return googleCallback(url,env);
+  const mediaFile = path.match(/^\/media\/([0-9a-f]{32})$/);
+  if (request.method==="GET" && mediaFile) {
+    const file = env.MEDIA ? await env.MEDIA.get("chat/" + mediaFile[1]) : null;
+    if (!file) throw new HttpError(404, "This file has expired.");
+    return new Response(file.body, { headers: {
+      "content-type": file.httpMetadata?.contentType || "application/octet-stream", "cache-control": "public, max-age=2592000",
+      "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'", "cross-origin-resource-policy": "cross-origin",
+    }});
+  }
   if (request.method==="GET" && path.startsWith("/avatar/")) return avatar(path.slice(8),env);
   if (request.method==="GET" && path.startsWith("/banner/")) return avatar(path.slice(8),env,"banners");
   const coverPath = path.match(/^\/playlist-cover\/([0-9a-f-]{36})\/([0-9a-zA-Z_-]{8,64})$/);

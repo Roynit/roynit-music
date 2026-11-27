@@ -61,6 +61,9 @@ object Account {
     /** Uploads a picture (profile picture or cover). */
     fun upload(path: String, bytes: ByteArray, type: String): JSONObject = send("PUT", path, { it.write(bytes) }, type)
 
+    /** Sends a file as a new item (a photo or voice message in a chat). */
+    fun post(path: String, bytes: ByteArray, type: String): JSONObject = send("POST", path, { it.write(bytes) }, type)
+
     /** Takes an `{"account": ...}` reply into the profile. Returns an error text, or null. */
     fun accept(reply: JSONObject): String? {
         if (reply.has("error")) return reply.getString("error")

@@ -229,3 +229,36 @@ fn karaoke_merges_matching_words_but_rejects_other_recordings() {
     assert!((lines[0].words[0].time - 5.).abs() < 0.001);
     assert!(lines[1].words.is_empty());
 }
+
+#[test]
+fn account_merge_keeps_deletions_from_coming_back() {
+    use riff_core::{account_music::Snapshot, model::{Library, Playlist, Track}};
+    let track = |n: &str| Track {
+        id: format!("ytmusic:{n}"), title: n.into(), artist: String::new(), album: String::new(), duration: 1.0,
+        source: format!("https://music.youtube.com/watch?v={n}"), platform: "ytmusic".into(), cover: None,
+        local_path: None, cache_path: None,
+    };
+    let cloud = |songs: &[&str]| {
+        let mut s = Snapshot::default();
+        for n in songs {
+            let t = track(n);
+            s.favorites.push(t.id.clone());
+            s.tracks.insert(t.id.clone(), t);
+        }
+        s.playlists.insert("p".into(), Playlist { id: "p".into(), name: "P".into(), tracks: s.favorites.clone(), cover: 0 });
+        s
+    };
+    let mut library = Library::default();
+    cloud(&["a", "b"]).merge_into(&mut library);
+    assert_eq!(library.favorites.len(), 2);
+    // Deleted here, cloud still has it: stays deleted.
+    library.favorites.retain(|id| id != "ytmusic:a");
+    library.playlists.get_mut("p").unwrap().tracks.retain(|id| id != "ytmusic:a");
+    cloud(&["a", "b"]).merge_into(&mut library);
+    assert_eq!(library.favorites, vec!["ytmusic:b"]);
+    assert_eq!(library.playlists["p"].tracks, vec!["ytmusic:b"]);
+    // Deleted on another device: goes here too.
+    cloud(&[]).merge_into(&mut library);
+    assert!(library.favorites.is_empty());
+    assert!(library.playlists["p"].tracks.is_empty());
+}

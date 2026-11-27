@@ -65,6 +65,8 @@ pub enum Event {
     Drop(Provider),
     /// The cloud library changed elsewhere (the phone, say): merge it into this device.
     Merge(Value),
+    /// The library just uploaded: what the cloud holds now.
+    Base(Value),
     /// A different account signed in on this device: set the old account's library aside first.
     Reset,
     /// A playlist's picture was set (a version above zero) or taken away (a negative one): the library records it.
@@ -136,6 +138,7 @@ pub struct State {
     next_sync: Instant,
     uploaded: Option<String>,
     uploading: Option<String>,
+    sent: Option<Value>,
     todo: VecDeque<Action>,
     links: Value,
     available: Value,
@@ -240,6 +243,7 @@ impl State {
             next_sync: Instant::now(),
             uploaded: None,
             uploading: None,
+            sent: None,
             todo: VecDeque::new(),
             links: Value::Null,
             available: Value::Null,
@@ -862,6 +866,9 @@ impl State {
                             Action::WriteMusic => {
                                 self.revision = data["revision"].as_u64();
                                 self.uploaded = self.uploading.take();
+                                if let Some(snapshot) = self.sent.take() {
+                                    self.events.push(Event::Base(snapshot));
+                                }
                                 self.cloud = data;
                                 self.notice("Music library synced.", false);
                             }
@@ -1044,6 +1051,7 @@ impl State {
             return;
         }
         self.uploading = Some(digest);
+        self.sent = Some(snapshot.clone());
         self.request(
             Action::WriteMusic,
             json!({ "snapshot":snapshot, "revision":revision }),
