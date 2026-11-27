@@ -43,8 +43,14 @@ class LiveService : Service() {
     private fun loop() {
         val app = applicationContext
         var after = -1L
+        var looked = 0L
         while (running) {
             Account.load(app)
+            // Every half hour: tell the listener when a newer version is out, even if the app has not been opened.
+            if (System.currentTimeMillis() - looked > 30 * 60_000) {
+                looked = System.currentTimeMillis()
+                runCatching { announceUpdate() }
+            }
             if (!Account.signedIn || !Notifier.live(app)) {
                 // Signed out or switched off: nothing to wait for.
                 running = false
@@ -62,6 +68,19 @@ class LiveService : Service() {
         }
     }
 
+    private fun announceUpdate() {
+        val current = packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
+        val release = Updater.check(current) ?: return
+        val prefs = getSharedPreferences("roy_update", Context.MODE_PRIVATE)
+        if (prefs.getString("told", "") == release.version) return
+        val manager = getSystemService(NotificationManager::class.java)
+        if (manager.getNotificationChannel(UPDATES) == null) manager.createNotificationChannel(NotificationChannel(UPDATES, "App updates", NotificationManager.IMPORTANCE_DEFAULT))
+        val open = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        manager.notify(7101, Notification.Builder(this, UPDATES).setSmallIcon(R.drawable.ic_send).setContentTitle("Roy Music ${release.version} is available")
+            .setContentText("Tap to update").setStyle(Notification.BigTextStyle().bigText(Updater.summary(release.notes))).setContentIntent(open).setAutoCancel(true).build())
+        prefs.edit().putString("told", release.version).apply()
+    }
+
     override fun onDestroy() {
         running = false
         super.onDestroy()
@@ -69,6 +88,7 @@ class LiveService : Service() {
 
     companion object {
         private const val CHANNEL = "live_v1"
+        private const val UPDATES = "updates_v1"
         private const val ID = 7100
 
         fun start(context: Context) {

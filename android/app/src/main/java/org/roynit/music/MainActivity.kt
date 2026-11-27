@@ -64,6 +64,7 @@ class MainActivity : Activity(), SongHost {
     override fun onResume() {
         super.onResume()
         Sync.resume()
+        lookForUpdate()
         Sync.watching(true)
         Notifier.foreground = true
         window.decorView.postDelayed({ Notifier.wishInApp(this) }, 1500)
@@ -207,15 +208,15 @@ class MainActivity : Activity(), SongHost {
         return root
     }
 
-    /** A slim bar that appears when a newer version is published; tapping it downloads, checks and installs. */
-    private fun updateBanner(): View {
-        val bar = label(13f, Color.BLACK, bold = true).apply {
-            gravity = Gravity.CENTER
-            background = roundRect(Ui.GREEN, 0)
-            setPadding(dp(12), dp(9), dp(12), dp(9))
-            visibility = View.GONE
-        }
-        // Every time the app opens: look for a newer version, fetch and check it quietly, then offer it in one tap.
+    private var updateBar: TextView? = null
+    private var lastLook = 0L
+    private var offered = ""
+
+    /** Looks for a newer version, fetches and checks it quietly, then offers it in one tap. At most every 20 minutes. */
+    private fun lookForUpdate() {
+        val bar = updateBar ?: return
+        if (System.currentTimeMillis() - lastLook < 20 * 60_000) return
+        lastLook = System.currentTimeMillis()
         Thread {
             val current = packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
             val release = Updater.check(current) ?: return@Thread
@@ -224,9 +225,26 @@ class MainActivity : Activity(), SongHost {
                 bar.text = "Update ${release.version} is ready. Tap to install."
                 bar.visibility = View.VISIBLE
                 bar.setOnClickListener { Updater.launch(this, file) }
-                ask("Update ${release.version} is ready", Updater.summary(release.notes), ok = "Update now", cancel = "Later") { Updater.launch(this, file) }
+                if (offered != release.version) {
+                    offered = release.version
+                    ask("Update ${release.version} is ready", Updater.summary(release.notes), ok = "Update now", cancel = "Later") { Updater.launch(this, file) }
+                }
             }
         }.start()
+    }
+
+    /** A slim bar that appears when a newer version is published; tapping it downloads, checks and installs. */
+    private fun updateBanner(): View {
+        val bar = label(13f, Color.BLACK, bold = true).apply {
+            gravity = Gravity.CENTER
+            background = roundRect(Ui.GREEN, 0)
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+            visibility = View.GONE
+        }
+        updateBar = bar
+        lookForUpdate()
+        // An app left open all day (music playing) still hears about a new version.
+        bar.postDelayed(object : Runnable { override fun run() { lookForUpdate(); bar.postDelayed(this, 21 * 60_000L) } }, 21 * 60_000L)
         return bar
     }
 

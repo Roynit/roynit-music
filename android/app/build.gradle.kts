@@ -12,8 +12,8 @@ android {
         // The Rust core links Android's AAudio, which arrived with Android 8.
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "0.2.3"
+        versionCode = 17
+        versionName = "0.2.4"
     }
 
     // Phones are arm64; the x86_64 build is only for emulators. One small APK per CPU.

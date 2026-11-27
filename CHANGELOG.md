@@ -1,3 +1,7 @@
+# Roy Music 0.3.9
+
+- A notification tells you when a new version is out, and the app looks for one every half hour instead of only at launch.
+
 # Roy Music 0.3.8
 
 - Deleted songs and playlists stay deleted: sync now notices what you removed, here or on another device, instead of bringing it back.

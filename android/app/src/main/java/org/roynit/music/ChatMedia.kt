@@ -42,13 +42,13 @@ object ChatMedia {
 
     fun has(context: Context, permission: String) = context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
 
-    /** A photo shrunk to at most 1280 px on its long side, upright, as a JPEG under the server's 450 KB limit. */
+    /** A photo shrunk to at most 1080 px on its long side, upright, as a JPEG under the server's 450 KB limit. */
     fun photo(context: Context, uri: Uri): ByteArray? = runCatching {
         val resolver = context.contentResolver
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
         var sample = 1
-        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 1280) sample *= 2
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 1080) sample *= 2
         val decoded = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample }) } ?: return null
         val turn = resolver.openInputStream(uri)?.use {
             when (ExifInterface(it).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
@@ -58,13 +58,13 @@ object ChatMedia {
                 else -> 0f
             }
         } ?: 0f
-        val scale = 1280f / maxOf(decoded.width, decoded.height)
+        val scale = 1080f / maxOf(decoded.width, decoded.height)
         val matrix = Matrix().apply { if (scale < 1f) postScale(scale, scale); if (turn != 0f) postRotate(turn) }
         val ready = if (scale < 1f || turn != 0f) Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true) else decoded
-        var quality = 85
+        var quality = 80
         var out = ByteArrayOutputStream()
         ready.compress(Bitmap.CompressFormat.JPEG, quality, out)
-        while (out.size() > 440_000 && quality > 35) {
+        while (out.size() > 260_000 && quality > 40) {
             quality -= 10
             out = ByteArrayOutputStream()
             ready.compress(Bitmap.CompressFormat.JPEG, quality, out)

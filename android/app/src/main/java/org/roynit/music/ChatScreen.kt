@@ -93,6 +93,7 @@ class ChatView(private val c: Context, private val onProfile: (JSONObject) -> Un
     private val albumTitle = c.label(18f, Color.WHITE, bold = true)
     private val albumGrid = android.widget.GridLayout(c).apply { columnCount = 2 }
     private var shots: List<String> = emptyList()
+    private var pinUntil = 0L
     private var shot = 0
 
 
@@ -312,6 +313,7 @@ class ChatView(private val c: Context, private val onProfile: (JSONObject) -> Un
     private fun draw(stick: Boolean) {
         val who = person ?: return
         val atBottom = list.height == 0 || scroll.scrollY + scroll.height >= list.height - c.dp(90)
+        if (stick || atBottom) pinUntil = System.currentTimeMillis() + 5000
         list.removeAllViews()
         var previous: JSONObject? = null
         // Photos sent together (same person, within two minutes) share one block.
@@ -375,7 +377,7 @@ class ChatView(private val c: Context, private val onProfile: (JSONObject) -> Un
         val onlyEmoji = m.optString("body").let { it.isNotEmpty() && it.length <= 12 && it.none { ch -> ch.isLetterOrDigit() || ch == ' ' } }
         if (onlyEmoji && media == null) { textBubble.textSize = 38f; textBubble.background = null; textBubble.setPadding(c.dp(4), c.dp(2), c.dp(4), c.dp(2)) }
         val bubble: View = when {
-            group != null -> gallery(group.map { it.optJSONObject("media")?.optString("url").orEmpty() })
+            group != null -> gallery(group.mapNotNull { it.optJSONObject("media") })
             media != null -> mediaBubble(media, mine, id)
             else -> textBubble
         }
@@ -587,11 +589,19 @@ class ChatView(private val c: Context, private val onProfile: (JSONObject) -> Un
     }
 
     /** Photos sent together, as one block of up to four pictures ("+N" over the last when there are more). */
-    private fun gallery(urls: List<String>): View {
+    /** Puts a photo in [image]: the copy kept on this phone from when it was sent, else the one on the server. */
+    private fun showMedia(image: ImageView, media: JSONObject, px: Int, onBitmap: ((android.graphics.Bitmap) -> Unit)? = null) {
+        val local = media.optString("local")
+        val bitmap = if (local.isNotEmpty()) android.graphics.BitmapFactory.decodeFile(local) else null
+        if (bitmap != null) { image.setImageBitmap(bitmap); onBitmap?.invoke(bitmap) } else Images.load(image, media.optString("url"), px, onBitmap)
+    }
+
+    private fun gallery(medias: List<JSONObject>): View {
+        val urls = medias.map { it.optString("url") }
         val width = (c.resources.displayMetrics.widthPixels * 0.62f).toInt()
         val gap = c.dp(2)
         fun tile(url: String, w: Int, h: Int, more: Int = 0) = FrameLayout(c).apply {
-            addView(ImageView(c).apply { scaleType = ImageView.ScaleType.CENTER_CROP; setBackgroundColor(Ui.RAISED); Images.load(this, url, c.dp(360)) }, FrameLayout.LayoutParams(w, h))
+            addView(ImageView(c).apply { scaleType = ImageView.ScaleType.CENTER_CROP; setBackgroundColor(Ui.RAISED); showMedia(this, medias[urls.indexOf(url)], c.dp(360)) }, FrameLayout.LayoutParams(w, h))
             if (more > 0) addView(c.label(22f, Color.WHITE, bold = true).apply { text = "+$more"; gravity = Gravity.CENTER; setBackgroundColor(0x99000000.toInt()) }, FrameLayout.LayoutParams(w, h))
         }
         fun line(vararg tiles: View) = LinearLayout(c).apply { tiles.forEachIndexed { i, t -> addView(t, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { if (i > 0) marginStart = gap }) } }
@@ -671,13 +681,14 @@ class ChatView(private val c: Context, private val onProfile: (JSONObject) -> Un
             .put("media", JSONObject().put("kind", kind).put("pending", true).put("seconds", seconds).put("url", "").put("expired", false))
 
     /** Shows [placeholder] at once, runs [work] on a worker thread, and swaps in what the server answers. */
-    private fun deliver(placeholder: JSONObject, work: () -> JSONObject) {
+    private fun deliver(placeholder: JSONObject, work: (JSONObject) -> JSONObject) {
         messages += placeholder
         draw(true)
         Thread {
-            val reply = work()
+            val reply = work(placeholder)
             post {
                 messages.remove(placeholder)
+                placeholder.optJSONObject("media")?.optString("local")?.takeIf { it.isNotEmpty() }?.let { reply.optJSONObject("media")?.put("local", it) }
                 if (!reply.has("error") && messages.none { it.optLong("id") == reply.optLong("id") }) {
                     messages += reply
                     last = maxOf(last, reply.optLong("id"))
@@ -693,9 +704,14 @@ class ChatView(private val c: Context, private val onProfile: (JSONObject) -> Un
         val replyId = replyingTo?.optLong("id") ?: 0
         replyingTo = null
         updateReplyBar()
-        for (uri in uris) deliver(pendingMedia("image", 0)) {
+        for (uri in uris) deliver(pendingMedia("image", 0)) { placeholder ->
             val bytes = ChatMedia.photo(c, uri)
-            if (bytes == null) JSONObject().put("error", "That photo could not be read.") else ChatMedia.send(who.optString("id"), "image", bytes, "image/jpeg", 0, replyId)
+            if (bytes == null) JSONObject().put("error", "That photo could not be read.") else {
+                // The photo shows in the conversation as soon as it is ready; the upload carries on behind it.
+                val copy = java.io.File(c.cacheDir, "sent-${System.nanoTime()}.jpg").also { it.writeBytes(bytes) }
+                post { placeholder.optJSONObject("media")?.put("local", copy.path); draw(true) }
+                ChatMedia.send(who.optString("id"), "image", bytes, "image/jpeg", 0, replyId)
+            }
         }
     }
 
@@ -756,7 +772,7 @@ class ChatView(private val c: Context, private val onProfile: (JSONObject) -> Un
                 setPadding(c.dp(14), c.dp(10), c.dp(14), c.dp(10))
             }
         }
-        if (media.optBoolean("pending")) {
+        if (media.optBoolean("pending") && !(kind == "image" && media.optString("local").isNotEmpty())) {
             return FrameLayout(c).apply {
                 background = roundRect(if (kind == "voice" && mine) Ui.GREEN else Ui.RAISED, c.dp(18))
                 alpha = 0.6f
@@ -771,11 +787,13 @@ class ChatView(private val c: Context, private val onProfile: (JSONObject) -> Un
                 clipRounded(c.dp(18))
                 layoutParams = LinearLayout.LayoutParams(maxWidth, (maxWidth * 0.75f).toInt())
             }
-            Images.load(image, url, c.dp(480)) { bitmap ->
+            showMedia(image, media, c.dp(480)) { bitmap ->
                 val ratio = (bitmap.height / bitmap.width.toFloat()).coerceIn(0.6f, 1.5f)
                 (image.layoutParams as? LinearLayout.LayoutParams)?.let { it.height = (maxWidth * ratio).toInt(); image.layoutParams = it }
+                // The photo made the conversation taller after it was drawn: stay at the bottom, where the new photo is.
+                if (System.currentTimeMillis() < pinUntil) scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
             }
-            image.setOnClickListener { openPhotos(listOf(url)) }
+            if (url.isNotEmpty()) image.setOnClickListener { openPhotos(listOf(url)) }
             return image
         }
         val seconds = media.optInt("seconds")

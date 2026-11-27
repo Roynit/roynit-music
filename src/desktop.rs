@@ -278,6 +278,8 @@ struct App {
     release_repo: String,
     update_info: Value,
     update_checked: bool,
+    update_due: std::time::Instant,
+    update_told: String,
     update_staging: bool,
     /// Update now was pressed: install as soon as the download is verified.
     update_now: bool,
@@ -580,6 +582,8 @@ impl App {
             release_repo: String::new(),
             update_info: json!({}),
             update_checked: false,
+            update_told: String::new(),
+            update_due: std::time::Instant::now() + std::time::Duration::from_secs(30 * 60),
             update_staging: false,
             update_now: false,
             update_dismissed: false,
@@ -824,6 +828,13 @@ impl App {
             }
             "update" | "update-silent" => {
                 self.update_info = data;
+                // Say so with a notification once per version, so a window left in the tray still tells you.
+                if let (true, Some(version)) = (self.update_info["available"] == true, self.update_info["version"].as_str())
+                    && self.update_told != version
+                {
+                    self.update_told = version.to_owned();
+                    notify::toast(&format!("Roy Music {version} is available"), "Open Roy Music to update.");
+                }
                 if tag == "update" {
                     self.update_dismissed = false;
                     self.status = match (self.update_info["available"] == true, self.update_info["version"].as_str()) {
@@ -7996,6 +8007,16 @@ impl App {
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // An app left open for days still hears about a new version: look again every half hour.
+        if self.update_checked && std::time::Instant::now() >= self.update_due {
+            self.update_due = std::time::Instant::now() + std::time::Duration::from_secs(30 * 60);
+            if self.update_info["available"] != true
+                && self.library.settings.get("auto_update_check") != Some(&json!(false))
+            {
+                self.send("update-silent", "updates.check", json!({}));
+            }
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs(60));
         // eframe shows the window after its first frame; a quiet start hides it again straight away.
         if self.quiet_frames > 0 {
             self.quiet_frames -= 1;
