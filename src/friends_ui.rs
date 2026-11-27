@@ -1,6 +1,7 @@
 //! The Friends space: a friend list with what everyone is listening to, direct messages and profiles.
 //! It takes over the sidebar and the right panel while it is open, the way Discord's home does.
-use super::friends::{Friend, Listening, Person, Playing};
+use super::chat_media_ui::{self as media_ui, PhotoView, Recorded};
+use super::friends::{Friend, Listening, Outgoing, Person, Playing};
 use super::*;
 use chrono::{Local, TimeZone};
 
@@ -965,6 +966,16 @@ impl App {
     fn chat_view(&mut self, ui: &mut egui::Ui, friend: &Friend) {
         const QUICK: [&str; 6] = ["❤", "😆", "😮", "😢", "😡", "👍"];
         let id = friend.person.id.clone();
+        if self.recording.as_ref().is_some_and(|(chat, _)| *chat != id) {
+            self.recording = None;
+        }
+        // Pictures dragged onto the window are sent to this friend.
+        let dropped = ui.ctx().input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
+        for file in dropped {
+            if let Some(path) = file.path.filter(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| ["jpg", "jpeg", "png", "webp"].contains(&e.to_lowercase().as_str()))) {
+                self.social.send_media(&id, Outgoing::Photo(path), None);
+            }
+        }
         ui.horizontal(|ui| {
             if Self::icon_button(ui, "←", "Back to friends", false).clicked() {
                 self.open_chat = None;
@@ -1002,15 +1013,26 @@ impl App {
                     ui.label(RichText::new(format!("This is the start of your chat with {}.", friend.person.display_name)).color(MUTED));
                 }
                 let mut day = String::new();
-                for (i, message) in messages.iter().enumerate() {
-                    let label = day_label(message.at);
+                let is_photo = |m: &super::friends::Message| m.media.as_ref().is_some_and(|x| x.kind == "image" && !x.expired);
+                // Photos sent together (same person, within two minutes) share one block.
+                let mut groups: Vec<Vec<usize>> = Vec::new();
+                for (i, m) in messages.iter().enumerate() {
+                    match groups.last_mut() {
+                        Some(g) if is_photo(m) && is_photo(&messages[g[g.len() - 1]]) && messages[g[g.len() - 1]].mine == m.mine && m.at - messages[g[g.len() - 1]].at <= 120 => g.push(i),
+                        _ => groups.push(vec![i]),
+                    }
+                }
+                for (gi, group) in groups.iter().enumerate() {
+                    let i = group[group.len() - 1];
+                    let message = &messages[i];
+                    let label = day_label(messages[group[0]].at);
                     if label != day {
                         ui.add_space(8.);
                         ui.vertical_centered(|ui| ui.label(RichText::new(&label).small().bold().color(MUTED)));
                         ui.add_space(4.);
                         day = label;
                     }
-                    let next = messages.get(i + 1);
+                    let next = groups.get(gi + 1).map(|g| &messages[g[0]]);
                     let last_of_run = next.is_none_or(|n| n.mine != message.mine || n.at - message.at > 300);
                     // A message that is only an emoji is shown big, with no bubble.
                     let emoji_only = !message.body.is_empty() && message.body.chars().count() <= 8 && message.body.chars().all(|c| !c.is_alphanumeric() && !c.is_whitespace());
@@ -1028,7 +1050,7 @@ impl App {
                         }
                         let column = if message.mine { egui::Layout::top_down(egui::Align::Max) } else { egui::Layout::top_down(egui::Align::Min) };
                         ui.with_layout(column, |ui| {
-                            let mut voice: Option<String> = None;
+                            let mut on_click: Option<Click> = None;
                             ui.spacing_mut().item_spacing.y = 2.;
                             if let Some(quote) = &message.reply {
                                 let who = if message.mine { "You" } else { name.as_str() };
@@ -1044,7 +1066,7 @@ impl App {
                                     ui.add(egui::Label::new(RichText::new(plain(&quote.body)).small().color(MUTED)).truncate());
                                 });
                             }
-                            let photo = message.media.as_ref().is_some_and(|m| m.kind == "image" && !m.expired);
+                            let photo = is_photo(message);
                             let frame = if emoji_only || photo {
                                 egui::Frame::new().inner_margin(egui::Margin::symmetric(2, 0))
                             } else {
@@ -1053,42 +1075,50 @@ impl App {
                                     .corner_radius(14)
                                     .inner_margin(egui::Margin::symmetric(12, 7))
                             };
-                            let bubble = frame
+                            let mut bubble = frame
                                 .show(ui, |ui| {
                                     ui.set_max_width((width * 0.7).max(160.));
+                                    if group.len() > 1 {
+                                        let medias: Vec<&super::friends::Media> = group.iter().filter_map(|k| messages[*k].media.as_ref()).collect();
+                                        media_ui::collage(ui, &medias);
+                                        on_click = Some(Click::Photos(PhotoView::of(&medias, None)));
+                                    } else {
                                     match &message.media {
                                         Some(media) if media.expired => {
                                             let what = if media.kind == "image" { "Photo" } else { "Voice message" };
                                             ui.label(RichText::new(format!("{what} expired")).color(MUTED));
                                         }
                                         Some(media) if media.kind == "image" => {
-                                            ui.add(egui::Image::new(media.url.as_str()).max_width(260.).corner_radius(14));
+                                            media_ui::single(ui, media);
+                                            if !media.pending {
+                                                on_click = Some(Click::Photos(PhotoView::of(&[media], Some(0))));
+                                            }
                                         }
                                         Some(media) => {
-                                            ui.horizontal(|ui| {
-                                                if ui.add(egui::Button::new(RichText::new("▶").size(16.)).corner_radius(16)).on_hover_text("Play").clicked() {
-                                                    voice = Some(media.url.clone());
-                                                }
-                                                ui.label(RichText::new(format!("Voice message  {}:{:02}", media.seconds / 60, media.seconds % 60)).bold());
-                                            });
+                                            media_ui::voice_bubble(ui, media, message.id);
+                                            if !media.pending {
+                                                on_click = Some(Click::Voice(media.url.clone()));
+                                            }
                                         }
                                         None => {
                                             let text = RichText::new(plain(&message.body));
                                             ui.add(egui::Label::new(if emoji_only { text.size(34.) } else { text }).wrap().selectable(false));
                                         }
                                     }
+                                    }
                                 })
                                 .response
                                 .interact(egui::Sense::click())
                                 .on_hover_text("Right-click to react or reply");
-                            if photo
-                                && bubble.clicked()
-                                && let Some(media) = &message.media
-                            {
-                                let _ = open::that(&media.url);
+                            if on_click.is_some() {
+                                bubble = bubble.on_hover_cursor(egui::CursorIcon::PointingHand);
                             }
-                            if let Some(url) = voice.take() {
-                                self.social.play_voice(&url);
+                            if bubble.clicked() {
+                                match on_click.take() {
+                                    Some(Click::Photos(view)) => self.photo_view = Some(view),
+                                    Some(Click::Voice(url)) => self.social.play_voice(&url),
+                                    None => {}
+                                }
                             }
                             bubble.context_menu(|ui| {
                                 ui.horizontal(|ui| {
@@ -1152,8 +1182,17 @@ impl App {
         }
         let mut send = false;
         let mut pick_photo = false;
+        let mut start_record = false;
+        let mut recorded = Recorded::Going;
+        let recording_here = self.recording.as_ref().is_some_and(|(chat, _)| *chat == id);
         ui.add_space(6.);
         ui.horizontal(|ui| {
+            if recording_here {
+                recorded = self.recording_bar(ui, accent);
+                return;
+            }
+            pick_photo = media_ui::icon_button(ui, 38., "Send photos", media_ui::photo_glyph).clicked();
+            start_record = media_ui::icon_button(ui, 38., "Record a voice message", media_ui::mic_glyph).clicked();
             egui::Frame::new()
                 .fill(ui.visuals().extreme_bg_color)
                 .stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(20)))
@@ -1174,9 +1213,6 @@ impl App {
                         if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             send = true;
                             field.request_focus();
-                        }
-                        if ui.add(egui::Button::new(RichText::new("Photo").small().color(MUTED)).frame(false)).on_hover_text("Send a photo").clicked() {
-                            pick_photo = true;
                         }
                         egui::containers::menu::MenuButton::new(RichText::new("☺").size(20.).color(MUTED))
                             .config(egui::containers::menu::MenuConfig::default().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
@@ -1233,12 +1269,37 @@ impl App {
             self.social.send(&id);
         }
         if pick_photo
-            && let Some(path) = rfd::FileDialog::new().add_filter("Pictures", &["jpg", "jpeg", "png", "webp"]).pick_file()
+            && let Some(paths) = rfd::FileDialog::new().add_filter("Pictures", &["jpg", "jpeg", "png", "webp"]).pick_files()
         {
             let reply = self.social.chats.get_mut(&id).and_then(|c| c.replying.take()).map(|m| m.id);
-            self.social.send_photo(&id, path, reply);
+            for (n, path) in paths.into_iter().enumerate() {
+                self.social.send_media(&id, Outgoing::Photo(path), if n == 0 { reply } else { None });
+            }
         }
+        if start_record {
+            match super::voice::Recorder::start() {
+                Ok(recorder) => self.recording = Some((id.clone(), recorder)),
+                Err(error) => self.social.notice = Some((error, true)),
+            }
+        }
+        match recorded {
+            Recorded::Going => {}
+            Recorded::Cancel => self.recording = None,
+            Recorded::Send => {
+                if let Some((_, recorder)) = self.recording.take() {
+                    let reply = self.social.chats.get_mut(&id).and_then(|c| c.replying.take()).map(|m| m.id);
+                    self.social.send_media(&id, Outgoing::Voice(recorder.finish()), reply);
+                }
+            }
+        }
+        self.photo_viewer(ui.ctx());
     }
+}
+
+/// What a tap on a message does.
+enum Click {
+    Photos(PhotoView),
+    Voice(String),
 }
 
 /// Emoji for the picker. The app's emoji font is a few years old, so these stay within what it can draw.

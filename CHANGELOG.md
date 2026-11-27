@@ -1,3 +1,9 @@
+# Roy Music 0.4.0
+
+- Voice messages: record from the microphone (mic button beside the message box) and play them in the app with a waveform.
+- Photos: pick several at once or drag them into the chat. Photos sent together show as one block; click it for a grid, then click a photo and use the arrow keys or drag to move between them.
+- Photos you send show at once and upload faster.
+
 # Roy Music 0.3.10
 
 - The song menu's "Remove from library" is now "Delete from everywhere", so it is not mistaken for removing a song from one playlist.

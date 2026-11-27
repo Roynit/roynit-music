@@ -5,6 +5,8 @@ mod friends_ui;
 mod image_cache;
 mod import_ui;
 mod notify;
+mod voice;
+mod chat_media_ui;
 mod shop_assets;
 mod shop_ui;
 mod reorder_ui;
@@ -280,6 +282,9 @@ struct App {
     update_checked: bool,
     update_due: std::time::Instant,
     update_told: String,
+    /// A voice message being recorded: the friend it is for, and the recording.
+    recording: Option<(String, voice::Recorder)>,
+    photo_view: Option<chat_media_ui::PhotoView>,
     update_staging: bool,
     /// Update now was pressed: install as soon as the download is verified.
     update_now: bool,
@@ -583,6 +588,8 @@ impl App {
             update_info: json!({}),
             update_checked: false,
             update_told: String::new(),
+            recording: None,
+            photo_view: None,
             update_due: std::time::Instant::now() + std::time::Duration::from_secs(30 * 60),
             update_staging: false,
             update_now: false,

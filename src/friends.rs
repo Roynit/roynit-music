@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    sync::mpsc,
+    sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
 
@@ -70,6 +70,18 @@ pub struct Media {
     pub url: String,
     pub seconds: i64,
     pub expired: bool,
+    /// The copy of a photo kept on this PC from when it was sent, so it shows at once and never has to be fetched back.
+    #[serde(skip)]
+    pub local: Option<Arc<[u8]>>,
+    /// Still being sent.
+    #[serde(skip)]
+    pub pending: bool,
+}
+
+/// What to send as a photo or voice message.
+pub enum Outgoing {
+    Photo(std::path::PathBuf),
+    Voice(super::voice::Clip),
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -127,6 +139,8 @@ enum Tag {
     Presence,
     Chat(String),
     Send(String),
+    /// A photo or voice message on its way: the chat and the negative id of the placeholder shown meanwhile.
+    Media(String, i64),
     Act(String),
     Taste(String),
     Person(String),
@@ -178,6 +192,9 @@ pub struct Social {
     shared: Option<Playing>,
     shared_position: f64,
     send_presence: bool,
+    /// Photos prepared on worker threads, as the placeholder they belong to and the bytes to show at once.
+    previews: Arc<Mutex<Vec<(i64, Arc<[u8]>)>>>,
+    placeholder: i64,
 }
 
 impl Social {
@@ -220,6 +237,8 @@ impl Social {
             shared: None,
             shared_position: 0.,
             send_presence: true,
+            previews: Arc::default(),
+            placeholder: -1,
         }
     }
 
@@ -399,39 +418,70 @@ impl Social {
         self.call(Tag::React, reqwest::Method::PUT, format!("/messages/{id}/quick"), Some(json!({"emoji": emoji})));
     }
 
-    /// Sends a photo: shrunk to 1280 px and saved as a JPEG under the server's limit, then added to the conversation.
-    pub fn send_photo(&mut self, id: &str, path: std::path::PathBuf, reply: Option<i64>) {
+    /// Sends a photo or a voice message. A placeholder shows in the chat at once (a photo shows itself as soon as it is
+    /// shrunk) and the server's answer replaces it.
+    pub fn send_media(&mut self, id: &str, what: Outgoing, reply: Option<i64>) {
         let Some(token) = self.token.clone() else {
             return;
         };
-        let mut address = format!("{}/messages/{id}/media?kind=image", self.endpoint);
+        let photo = matches!(what, Outgoing::Photo(_));
+        let seconds = match &what {
+            Outgoing::Voice(clip) => (clip.samples.len() as f32 / clip.rate as f32).round() as i64,
+            Outgoing::Photo(_) => 0,
+        };
+        self.placeholder -= 1;
+        let mark = self.placeholder;
+        let chat = self.chats.entry(id.to_owned()).or_default();
+        let quote = reply.filter(|r| *r > 0).and_then(|r| chat.messages.iter().find(|m| m.id == r)).map(|m| Quote { id: m.id, mine: m.mine, body: m.body.chars().take(120).collect() });
+        chat.messages.push(Message {
+            id: mark,
+            mine: true,
+            body: if photo { "\u{1F4F7} Photo" } else { "\u{1F3A4} Voice message" }.into(),
+            at: now_seconds(),
+            reply: quote,
+            media: Some(Media { kind: if photo { "image" } else { "voice" }.into(), seconds, pending: true, ..Default::default() }),
+        });
+        chat.stick = true;
+        let mut address = format!("{}/messages/{id}/media?kind={}", self.endpoint, if photo { "image" } else { "voice" });
+        if seconds > 0 {
+            address.push_str(&format!("&seconds={seconds}"));
+        }
         if let Some(target) = reply.filter(|r| *r > 0) {
             address.push_str(&format!("&reply_to={target}"));
         }
-        let client = self.client.clone();
+        let (client, previews) = (self.client.clone(), self.previews.clone());
         let (tx, rx) = mpsc::channel();
-        self.calls.push((Tag::Send(id.to_owned()), rx));
-        self.notice = Some(("Sending photo…".into(), false));
+        self.calls.push((Tag::Media(id.to_owned(), mark), rx));
         std::thread::spawn(move || {
             let result = (|| {
-                let picture = image::open(&path).map_err(|_| "That file is not a supported picture.".to_owned())?;
-                let picture = if picture.width().max(picture.height()) > 1280 { picture.resize(1280, 1280, image::imageops::FilterType::Lanczos3) } else { picture };
-                let rgb = picture.to_rgb8();
-                let mut bytes = Vec::new();
-                for quality in [85, 72, 60, 48, 38] {
-                    bytes.clear();
-                    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality).encode_image(&rgb).map_err(|_| "Could not prepare that picture.".to_owned())?;
-                    if bytes.len() <= 440_000 {
-                        break;
+                let (bytes, kind) = match what {
+                    Outgoing::Photo(path) => {
+                        let picture = image::open(&path).map_err(|_| "That file is not a supported picture.".to_owned())?;
+                        let picture = if picture.width().max(picture.height()) > 1080 { picture.resize(1080, 1080, image::imageops::FilterType::Lanczos3) } else { picture };
+                        let rgb = picture.to_rgb8();
+                        let mut bytes = Vec::new();
+                        for quality in [80, 70, 60, 50, 40] {
+                            bytes.clear();
+                            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality).encode_image(&rgb).map_err(|_| "Could not prepare that picture.".to_owned())?;
+                            if bytes.len() <= 260_000 {
+                                break;
+                            }
+                        }
+                        if bytes.len() > 440_000 {
+                            return Err("That picture is too detailed. Try a simpler one.".to_owned());
+                        }
+                        if let Ok(mut list) = previews.lock() {
+                            list.push((mark, Arc::from(bytes.as_slice())));
+                        }
+                        (bytes, "image/jpeg")
                     }
-                }
-                if bytes.len() > 440_000 {
-                    return Err("That picture is too detailed. Try a simpler one.".to_owned());
-                }
+                    Outgoing::Voice(clip) => (super::voice::encode(clip)?.0, "audio/mp4"),
+                };
                 let response = client
                     .post(address)
+                    .timeout(Duration::from_secs(60))
                     .bearer_auth(token)
-                    .header("content-type", "image/jpeg")
+                    .header("content-type", kind)
                     .body(bytes)
                     .send()
                     .map_err(|_| "Could not reach Roynit ID.".to_owned())?;
@@ -443,23 +493,9 @@ impl Social {
         });
     }
 
-    /// Plays a voice message with the system's sound player: the file is fetched once into the temporary folder.
+    /// Plays a voice message (or stops it, when it is the one playing).
     pub fn play_voice(&self, url: &str) {
-        use std::hash::{Hash, Hasher};
-        let (client, url) = (self.client.clone(), url.to_owned());
-        std::thread::spawn(move || {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            url.hash(&mut hasher);
-            let path = std::env::temp_dir().join(format!("roy-voice-{:x}.m4a", hasher.finish()));
-            if !path.is_file()
-                && let Ok(bytes) = client.get(&url).send().and_then(|r| r.error_for_status()).and_then(|r| r.bytes())
-            {
-                let _ = std::fs::write(&path, &bytes);
-            }
-            if path.is_file() {
-                let _ = open::that(&path);
-            }
-        });
+        super::voice::toggle(self.client.clone(), url.to_owned());
     }
 
     pub fn open_chat(&mut self, id: &str) {
@@ -526,6 +562,15 @@ impl Social {
     }
 
     fn drain(&mut self) {
+        let ready: Vec<_> = self.previews.lock().map(|mut l| std::mem::take(&mut *l)).unwrap_or_default();
+        for (mark, bytes) in ready {
+            for chat in self.chats.values_mut() {
+                if let Some(media) = chat.messages.iter_mut().find(|m| m.id == mark).and_then(|m| m.media.as_mut()) {
+                    media.local = Some(bytes.clone());
+                    chat.stick = true;
+                }
+            }
+        }
         let mut finished = Vec::new();
         let mut index = 0;
         while index < self.calls.len() {
@@ -572,8 +617,8 @@ impl Social {
                 let last = chat.messages.iter().map(|m| m.id).max().unwrap_or(0);
                 let fresh: Vec<Message> = fresh.into_iter().filter(|m| m.id > last).collect();
                 let any = !fresh.is_empty();
-                for message in fresh.iter().filter(|m| m.mine) {
-                    if let Some(at) = chat.messages.iter().position(|m| m.id < 0 && m.body == message.body) {
+                for message in fresh.iter().filter(|m| m.mine && m.media.is_none()) {
+                    if let Some(at) = chat.messages.iter().position(|m| m.id < 0 && m.media.is_none() && m.body == message.body) {
                         chat.messages.remove(at);
                     }
                 }
@@ -599,7 +644,7 @@ impl Social {
             (Tag::Send(id), Ok(data)) => {
                 if let Ok(mut message) = serde_json::from_value::<Message>(data) {
                     let chat = self.chats.entry(id).or_default();
-                    if let Some(at) = chat.messages.iter().position(|m| m.id < 0 && m.body == message.body) {
+                    if let Some(at) = chat.messages.iter().position(|m| m.id < 0 && m.media.is_none() && m.body == message.body) {
                         // The server does not echo the quote back; the placeholder still has it.
                         message.reply = chat.messages.remove(at).reply;
                     }
@@ -608,6 +653,35 @@ impl Social {
                     }
                     chat.stick = true;
                 }
+            }
+            (Tag::Media(id, mark), Ok(data)) => {
+                if let Ok(mut message) = serde_json::from_value::<Message>(data) {
+                    let chat = self.chats.entry(id).or_default();
+                    let old = chat.messages.iter().position(|m| m.id == mark).map(|at| chat.messages.remove(at));
+                    let (local, quote) = old.map(|m| (m.media.and_then(|x| x.local), m.reply)).unwrap_or_default();
+                    // The server does not echo the quote back, and the copy kept here saves fetching the photo again.
+                    message.reply = quote;
+                    match chat.messages.iter_mut().find(|m| m.id == message.id) {
+                        Some(existing) => {
+                            if let Some(media) = existing.media.as_mut() {
+                                media.local = local;
+                            }
+                        }
+                        None => {
+                            if let Some(media) = message.media.as_mut() {
+                                media.local = local;
+                            }
+                            chat.messages.push(message);
+                        }
+                    }
+                    chat.stick = true;
+                }
+            }
+            (Tag::Media(id, mark), Err(error)) => {
+                if let Some(chat) = self.chats.get_mut(&id) {
+                    chat.messages.retain(|m| m.id != mark);
+                }
+                self.notice = Some((error, true));
             }
             (Tag::Act(what), Ok(data)) => {
                 let name = data["name"].as_str().unwrap_or("them");
@@ -625,7 +699,7 @@ impl Social {
             (Tag::Send(id), Err(error)) => {
                 // It did not go: take the placeholder back out.
                 if let Some(chat) = self.chats.get_mut(&id) {
-                    chat.messages.retain(|m| m.id >= 0);
+                    chat.messages.retain(|m| m.id >= 0 || m.media.is_some());
                 }
                 self.notice = Some((error, true));
             }
