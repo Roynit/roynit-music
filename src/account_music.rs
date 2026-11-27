@@ -147,7 +147,12 @@ impl Snapshot {
         }
         for (id, playlist) in self.playlists {
             if id == playlist.id {
-                library.playlists.entry(id).or_insert(playlist);
+                let version = playlist.cover;
+                let local = library.playlists.entry(id).or_insert(playlist);
+                // The newest change to the picture wins, whichever device made it.
+                if version.abs() > local.cover.abs() {
+                    local.cover = version;
+                }
             }
         }
         let mut favorites: HashSet<_> = library.favorites.iter().cloned().collect();

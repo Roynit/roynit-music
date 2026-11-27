@@ -529,3 +529,30 @@ test("quick icon: shared by both friends, shown in the friend list and the chat,
   await request("/messages/" + b.account.id + "/quick", "PUT", { emoji: "" }, a.token);
   assert.equal((await request("/messages/" + a.account.id, "GET", undefined, b.token)).quick, null, "empty goes back to the default");
 });
+
+test("playlist covers: a picture per playlist that follows the library, validated and removable", async () => {
+  const nonce = crypto.randomUUID().replaceAll("-", "").slice(0, 11);
+  const a = await request("/register", "POST", { email: "pc" + nonce + "@example.test", username: "pc_" + nonce, password: "local-" + crypto.randomUUID() });
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+  const put = (id, body, type = "image/png", token = a.token) => fetch(base + "/playlists/" + id + "/cover", { method: "PUT", headers: { authorization: "Bearer " + token, "content-type": type }, body });
+  const first = await put("list-aaaa1111", png);
+  assert.equal(first.status, 200);
+  const v1 = (await first.json()).version;
+  assert.ok(v1 > 0);
+  const second = await (await put("list-aaaa1111", png)).json();
+  assert.ok(second.version > v1, "every change raises the version");
+  assert.equal((await put("list-aaaa1111", new Uint8Array([1, 2, 3, 4]), "image/png")).status, 400, "bytes must look like an image");
+  assert.equal((await put("list-aaaa1111", png, "image/gif")).status, 400);
+  const shown = await fetch(base + "/playlist-cover/" + a.account.id + "/list-aaaa1111");
+  assert.equal(shown.status, 200);
+  assert.equal(shown.headers.get("content-type"), "image/png");
+  assert.equal((await fetch(base + "/playlist-cover/" + a.account.id + "/other-list-1")).status, 404);
+  // the library snapshot keeps the version for every device
+  const track = { id: "ytmusic:abcdefghijk", title: "t", artist: "a", album: "", duration: 1, source: "https://music.youtube.com/watch?v=abcdefghijk", platform: "ytmusic", cover: null };
+  const saved = await request("/music", "PUT", { revision: 0, snapshot: { tracks: { [track.id]: track }, playlists: { "list-aaaa1111": { id: "list-aaaa1111", name: "Mine", tracks: [track.id], cover: second.version } }, favorites: [], history: [] } }, a.token);
+  const back = await request("/music", "GET", undefined, a.token);
+  assert.equal(back.snapshot.playlists["list-aaaa1111"].cover, second.version);
+  const gone = await fetch(base + "/playlists/list-aaaa1111/cover", { method: "DELETE", headers: { authorization: "Bearer " + a.token } });
+  assert.ok((await gone.json()).version < 0, "taking it away is a negative version");
+  assert.equal((await fetch(base + "/playlist-cover/" + a.account.id + "/list-aaaa1111")).status, 404);
+});

@@ -107,6 +107,9 @@ class HomePage(context: Context, host: SongHost) : Page(context, host) {
     /** The whole page above the YouTube feed; cheap to rebuild whenever the library or the mixes change. */
     private fun draw() {
         drawn = signature()
+        val firstShown = list.firstVisiblePosition
+        val offset = list.getChildAt(0)?.top ?: 0
+        list.post { if (firstShown > 0 || offset != 0) list.setSelectionFromTop(firstShown, offset) }
         body.removeAllViews()
         // Spotify's top row: your picture, then chips that choose what to show.
         val avatar = ImageView(c).apply {
@@ -861,7 +864,7 @@ class LibraryPage(context: Context, host: SongHost, private val onContext: (Play
             Tab.Playlists -> {
                 if (q.isEmpty() || "liked songs".contains(q)) out += Row("Liked Songs", "Playlist • ${Library.favorites.size} songs", emptyList(), liked = true, pinned = true)
                 Library.playlists.filter { q.isEmpty() || it.name.lowercase().contains(q) }.forEach {
-                    out += Row(it.name, "Playlist • ${it.songs.size} " + if (it.songs.size == 1) "song" else "songs", it.songs.take(4).map(Song::cover), playlist = it)
+                    out += Row(it.name, "Playlist • ${it.songs.size} " + if (it.songs.size == 1) "song" else "songs", it.coverUrls(), playlist = it)
                 }
             }
             Tab.Artists -> {
@@ -916,6 +919,7 @@ class LibraryPage(context: Context, host: SongHost, private val onContext: (Play
         openLiked = liked
         onContext(playlist)
         drawDetail()
+        detailList.setSelection(0)
         detail.alpha = 0f
         detail.visibility = VISIBLE
         detail.animate().alpha(1f).setDuration(180).withLayer().start()
@@ -929,11 +933,15 @@ class LibraryPage(context: Context, host: SongHost, private val onContext: (Play
     }
 
     private fun drawDetail() {
+        // The page is rebuilt whenever the library changes (a new song played, a song removed): keep where the person was.
+        val rebuild = detailHeader != null
+        val firstShown = detailList.firstVisiblePosition
+        val offset = detailList.getChildAt(0)?.top ?: 0
         val songs = if (openLiked) Library.favorites.toList() else open?.songs?.toList().orEmpty()
         val name = if (openLiked) "Liked Songs" else open?.name.orEmpty()
         adapter.songs = songs
         val header = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL }
-        val cover = cover(if (openLiked) emptyList() else songs.take(4).map(Song::cover), openLiked, 190, 6)
+        val cover = cover(if (openLiked) emptyList() else open?.coverUrls() ?: songs.take(4).map(Song::cover), openLiked, 190, 6)
         val top = FrameLayout(c).apply {
             addView(cover, LayoutParams(c.dp(190), c.dp(190), Gravity.CENTER_HORIZONTAL or Gravity.TOP).apply { topMargin = c.dp(56) })
             addView(c.icon(R.drawable.ic_arrow_back, Color.WHITE, 44, 10).apply { setOnClickListener { back() } }, LayoutParams(c.dp(44), c.dp(44), Gravity.TOP or Gravity.START).apply { setMargins(c.dp(8), c.dp(8), 0, 0) })
@@ -987,7 +995,8 @@ class LibraryPage(context: Context, host: SongHost, private val onContext: (Play
         if (old != null) detailList.removeHeaderView(old)
         detailHeader = header
         detailList.addHeaderView(header, null, false)
-        detailList.adapter = adapter
+        if (detailList.adapter == null) detailList.adapter = adapter
+        if (rebuild) detailList.setSelectionFromTop(firstShown, offset)
     }
 
     private var detailHeader: View? = null
@@ -1005,13 +1014,17 @@ class LibraryPage(context: Context, host: SongHost, private val onContext: (Play
         val playlist = open
         if (playlist != null) {
             menu.menu.add(0, 1, 0, "Rename")
-            menu.menu.add(0, 2, 1, "Delete playlist")
+            menu.menu.add(0, 4, 1, "Change picture")
+            if (playlist.cover > 0) menu.menu.add(0, 5, 1, "Remove picture")
+            menu.menu.add(0, 2, 2, "Delete playlist")
         }
         menu.menu.add(0, 3, 2, "Share")
         menu.setOnMenuItemClickListener {
             when (it.itemId) {
                 1 -> rename(playlist!!)
                 2 -> { Library.delete(playlist!!); closeDetail() }
+                4 -> pickCover(playlist!!)
+                5 -> removeCover(playlist!!)
                 3 -> {
                     val songs = adapter.songs
                     val text = "$name\n" + songs.take(30).joinToString("\n") { s -> "${s.title} - ${s.artist}" }
@@ -1022,6 +1035,52 @@ class LibraryPage(context: Context, host: SongHost, private val onContext: (Play
             true
         }
         menu.show()
+    }
+
+    private var coverFor: Playlist? = null
+
+    /** Opens the gallery to choose a picture for the playlist; [picked] gets it back. */
+    private fun pickCover(playlist: Playlist) {
+        if (!Account.signedIn) { c.say("Sign in with your Roy account to give a playlist its own picture."); return }
+        coverFor = playlist
+        (c as android.app.Activity).startActivityForResult(android.content.Intent(android.content.Intent.ACTION_GET_CONTENT).setType("image/*"), 13)
+    }
+
+    /** The picture the user chose: cropped square on screen, shrunk to the server's limit, then saved on the account. */
+    fun coverPicked(uri: android.net.Uri) {
+        val playlist = coverFor ?: return
+        host.crop(uri, false, 512, 512) { cropped ->
+            if (cropped == null) return@crop
+            Thread {
+                var quality = 90
+                var out = java.io.ByteArrayOutputStream()
+                cropped.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, out)
+                while (out.size() > 230_000 && quality > 30) {
+                    quality -= 10
+                    out = java.io.ByteArrayOutputStream()
+                    cropped.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, out)
+                }
+                val reply = Account.upload("/playlists/${playlist.id}/cover", out.toByteArray(), "image/jpeg")
+                post {
+                    if (reply.has("error")) c.say(reply.optString("error")) else {
+                        Library.setCover(playlist, reply.optLong("version"))
+                        if (open === playlist) drawDetail()
+                    }
+                }
+            }.start()
+        }
+    }
+
+    private fun removeCover(playlist: Playlist) {
+        Thread {
+            val reply = Account.call("DELETE", "/playlists/${playlist.id}/cover")
+            post {
+                if (reply.has("error")) c.say(reply.optString("error")) else {
+                    Library.setCover(playlist, reply.optLong("version"))
+                    if (open === playlist) drawDetail()
+                }
+            }
+        }.start()
     }
 
     private fun rename(playlist: Playlist) {

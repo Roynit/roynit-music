@@ -117,6 +117,7 @@ class SheetMenu(private val context: android.content.Context, private val anchor
     private fun iconFor(title: String): Int? = when {
         title.startsWith("Delete") || title.startsWith("Remove") -> R.drawable.ic_close
         title.startsWith("Rename") -> R.drawable.ic_edit
+        title.startsWith("Change picture") -> R.drawable.ic_camera
         title.startsWith("Share") -> R.drawable.ic_share
         title.startsWith("Sleep") -> R.drawable.ic_moon
         title.startsWith("Blend") -> R.drawable.ic_blend

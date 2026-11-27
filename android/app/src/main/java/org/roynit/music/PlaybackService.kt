@@ -90,8 +90,11 @@ class PlaybackService : MediaSessionService() {
             .build()
         // A song that cannot be opened is skipped instead of stopping the music; songs played are remembered, and
         // when the queue is about to run out, similar songs are added so the music carries on.
+        Widgets.player = player
+        Library.widgetHook = { Widgets.refresh(applicationContext) }
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                Widgets.refresh(applicationContext)
                 mediaItem?.let { Library.played(it.toSong()) }
                 saveQueue(player)
                 announce(player)
@@ -99,6 +102,7 @@ class PlaybackService : MediaSessionService() {
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                Widgets.refresh(applicationContext)
                 if (!isPlaying) saveQueue(player)
                 announce(player)
                 main.removeCallbacks(heartbeat)
@@ -187,6 +191,39 @@ class PlaybackService : MediaSessionService() {
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
 
+    /** The home-screen widgets' buttons arrive here as plain intents; anything else is the media library's own. */
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val action = intent?.action.orEmpty()
+        if (action.startsWith("org.roynit.music.widget.")) {
+            val player = session?.player
+            if (player != null) when (action) {
+                Widgets.PLAY -> if (player.isPlaying) player.pause() else {
+                    if (player.playbackState == Player.STATE_IDLE) player.prepare()
+                    player.play()
+                }
+                Widgets.NEXT -> player.seekToNextMediaItem()
+                Widgets.PREV -> player.seekToPreviousMediaItem()
+                Widgets.LIKE -> player.currentMediaItem?.toSong()?.let(Library::toggleFavorite)
+                Widgets.PLAY_LIST -> {
+                    // A list started from a widget: liked songs play shuffled, a playlist plays in order.
+                    val id = intent?.getStringExtra("list").orEmpty()
+                    val (name, songs) = Widgets.songsOf(id) ?: ("" to emptyList())
+                    if (intent?.getBooleanExtra("feature", false) == true) Widgets.setFeatured(applicationContext, id)
+                    if (songs.isNotEmpty()) {
+                        Playback.sourceName = name
+                        val ordered = if (id == "liked") songs.shuffled() else songs
+                        player.setMediaItems(ordered.map { it.toItem().withPlayUri() }, 0, 0)
+                        player.prepare()
+                        player.play()
+                    }
+                }
+            }
+            Widgets.refresh(applicationContext)
+            return START_NOT_STICKY
+        }
+        return super.onStartCommand(intent, flags, startId)
+    }
+
     /** Swiping the app away must not cut the music; only an idle service goes away. */
     override fun onTaskRemoved(rootIntent: Intent?) {
         val player = session?.player
@@ -194,6 +231,8 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        Widgets.player = null
+        Library.widgetHook = null
         session?.run {
             player.release()
             release()

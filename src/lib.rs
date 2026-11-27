@@ -775,6 +775,7 @@ impl Engine {
                         id: uuid::Uuid::new_v4().to_string(),
                         name: "Spotify liked tracks".into(),
                         tracks: ids,
+                        cover: 0,
                     };
                     self.store
                         .data
@@ -800,6 +801,7 @@ impl Engine {
                         id: uuid::Uuid::new_v4().to_string(),
                         name: result["name"].as_str().unwrap_or("YouTube library").into(),
                         tracks: ids,
+                        cover: 0,
                     };
                     self.store
                         .data
@@ -874,6 +876,7 @@ impl Engine {
                         id: uuid::Uuid::new_v4().to_string(),
                         name: result["name"].as_str().unwrap_or("Imported").into(),
                         tracks: tracks.iter().map(|t| t.id.clone()).collect(),
+                        cover: 0,
                     };
                     for track in tracks {
                         self.store.data.tracks.insert(track.id.clone(), track);
@@ -1926,6 +1929,7 @@ impl Engine {
                     id: id.clone(),
                     name: text(p, "name")?.into(),
                     tracks,
+                    cover: p["cover"].as_i64().unwrap_or_else(|| self.store.data.playlists.get(&id).map_or(0, |old| old.cover)),
                 };
                 self.store.data.playlists.insert(id.clone(), playlist.clone());
                 if !self.store.data.playlist_order.contains(&id) {
@@ -1933,6 +1937,15 @@ impl Engine {
                 }
                 self.store.save()?;
                 Ok(json!(playlist))
+            }
+            "playlist.cover" => {
+                let id = text(p, "id")?.to_owned();
+                let version = p["cover"].as_i64().unwrap_or(0);
+                if let Some(playlist) = self.store.data.playlists.get_mut(&id) {
+                    playlist.cover = version;
+                }
+                self.store.save()?;
+                Ok(json!({"id": id, "cover": version}))
             }
             "playlist.reorder" => {
                 let wanted: Vec<String> = serde_json::from_value(p["ids"].clone())?;
@@ -2110,6 +2123,7 @@ impl Engine {
                     id: uuid::Uuid::new_v4().to_string(),
                     name: result["name"].as_str().unwrap_or("Imported").into(),
                     tracks: tracks.iter().map(|t| t.id.clone()).collect(),
+                    cover: 0,
                 };
                 for t in tracks {
                     self.store.data.tracks.insert(t.id.clone(), t);
@@ -2126,7 +2140,7 @@ impl Engine {
                 let source=text(p,"url")?;let metadata=catalog::metadata_with_proxy(&self.client,source,self.oauth.token("spotify").ok(),self.providers.proxy.as_deref())?;
                 let plan=catalog::import_plan(&metadata,source,boolean(p,"allow_partial",false))?;
                 let tracks:Vec<Track>=serde_json::from_value(plan["tracks"].clone())?;
-                let playlist=Playlist{id:uuid::Uuid::new_v4().to_string(),name:plan["name"].as_str().unwrap_or("Imported playlist").into(),tracks:tracks.iter().map(|t|t.id.clone()).collect()};
+                let playlist=Playlist{id:uuid::Uuid::new_v4().to_string(),name:plan["name"].as_str().unwrap_or("Imported playlist").into(),tracks:tracks.iter().map(|t|t.id.clone()).collect(),cover:0};
                 for track in tracks{self.store.data.tracks.insert(track.id.clone(),track);}
                 self.store.data.playlists.insert(playlist.id.clone(),playlist.clone());self.store.save()?;
                 let mut result=plan;result["playlist"]=json!(playlist);Ok(result)
@@ -2400,6 +2414,7 @@ pub const COMMANDS: &[&str] = &[
     "dislikes.set",
     "history.clear",
     "playlist.save",
+    "playlist.cover",
     "mix.apply",
     "music.mixes",
     "playlist.delete",

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_now_playing_description">What is playing, with the cover, previous, play, next and like</string>
+    <string name="widget_cover_description">A square cover with the song and a play button</string>
+    <string name="widget_library_description">Liked songs and your playlists: one tap starts any of them</string>
+    <string name="widget_list_description">Pick liked songs or any playlist and start it with one tap</string>
+</resources>

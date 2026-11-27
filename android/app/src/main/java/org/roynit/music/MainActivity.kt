@@ -289,6 +289,7 @@ class MainActivity : Activity(), SongHost {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
         @Suppress("DEPRECATION") super.onActivityResult(requestCode, resultCode, data)
         if ((requestCode == 11 || requestCode == 12) && resultCode == RESULT_OK) data?.data?.let(friends::picked)
+        if (requestCode == 13 && resultCode == RESULT_OK) data?.data?.let(library::coverPicked)
     }
 
     private lateinit var miniFill: View

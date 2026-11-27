@@ -9,7 +9,17 @@ import java.io.File
 import java.util.UUID
 import java.util.concurrent.Executors
 
-class Playlist(var name: String, val songs: ArrayList<Song> = ArrayList(), val id: String = UUID.randomUUID().toString())
+/**
+ * [cover] is the version of the picture chosen for this playlist (kept on the Roy account, so every device shows it):
+ * above zero there is a picture, below zero it was taken away, zero means none was ever chosen.
+ */
+class Playlist(var name: String, val songs: ArrayList<Song> = ArrayList(), val id: String = UUID.randomUUID().toString(), var cover: Long = 0) {
+    /** What to draw as this playlist's picture: its own picture when it has one, otherwise the covers of its first songs. */
+    fun coverUrls(): List<String?> {
+        val owner = Account.profile.optString("id")
+        return if (cover > 0 && Account.signedIn && owner.isNotEmpty()) listOf("${Account.BASE}/playlist-cover/$owner/$id?v=$cover") else songs.take(4).map(Song::cover)
+    }
+}
 
 /** One play: which song and when (seconds since 1970), the same record the PC app keeps. */
 class PlayEvent(val song: Song, val at: Long)
@@ -61,7 +71,7 @@ object Library {
             val lists = root.optJSONArray("playlists") ?: JSONArray()
             for (i in 0 until lists.length()) {
                 val o = lists.getJSONObject(i)
-                val p = Playlist(o.optString("name"), id = o.optString("id").ifEmpty { UUID.randomUUID().toString() })
+                val p = Playlist(o.optString("name"), id = o.optString("id").ifEmpty { UUID.randomUUID().toString() }, cover = o.optLong("cover"))
                 read(o.optJSONArray("songs"), p.songs)
                 playlists += p
             }
@@ -91,15 +101,19 @@ object Library {
             .put("favorites", JSONArray(favorites.map { it.toJson() }))
             .put("dislikes", JSONArray(dislikes.map { it.toJson() }))
             .put("events", JSONArray(events.map { JSONObject().put("song", it.song.toJson()).put("at", it.at) }))
-            .put("playlists", JSONArray(playlists.map { JSONObject().put("id", it.id).put("name", it.name).put("songs", JSONArray(it.songs.map { s -> s.toJson() })) }))
+            .put("playlists", JSONArray(playlists.map { JSONObject().put("id", it.id).put("name", it.name).put("cover", it.cover).put("songs", JSONArray(it.songs.map { s -> s.toJson() })) }))
         val text = root.toString()
         disk.execute { runCatching { f.writeText(text) } }
     }
+
+    /** Set by the playback service so home-screen widgets show a like the moment it happens. */
+    var widgetHook: (() -> Unit)? = null
 
     private fun changed(sync: Boolean = true) {
         main.removeCallbacks(saveSoon)
         main.postDelayed(saveSoon, 600)
         onChange?.invoke()
+        widgetHook?.invoke()
         if (sync) Sync.later()
     }
 
@@ -191,6 +205,14 @@ object Library {
 
     fun delete(playlist: Playlist) {
         playlists.remove(playlist)
+        // Its picture goes too, so the account does not keep pictures of playlists that no longer exist.
+        if (playlist.cover > 0 && Account.signedIn) Thread { Account.call("DELETE", "/playlists/${playlist.id}/cover") }.start()
+        changed()
+    }
+
+    /** A picture was set (a version above zero) or taken away (a negative one) for a playlist. */
+    fun setCover(playlist: Playlist, version: Long) {
+        playlist.cover = version
         changed()
     }
 
@@ -222,6 +244,9 @@ object Library {
         for (id in lists?.keys() ?: emptyList<String>().iterator()) {
             val p = lists!!.optJSONObject(id) ?: continue
             val local = playlists.firstOrNull { it.id == id } ?: Playlist(p.optString("name"), id = id).also { playlists += it }
+            // The newest change to the picture wins, whichever device made it.
+            val version = p.optLong("cover")
+            if (Math.abs(version) > Math.abs(local.cover)) local.cover = version
             val ids = p.optJSONArray("tracks")
             for (i in 0 until (ids?.length() ?: 0)) songs[ids!!.optString(i)]?.let { s -> if (local.songs.none { it.id == s.id }) local.songs += s }
         }

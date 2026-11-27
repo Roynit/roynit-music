@@ -268,7 +268,8 @@ function musicSnapshot(input) {
   const playlists = Object.create(null);
   for (const [id,p] of Object.entries(input.playlists)) {
     if (p && p.id===id && Array.isArray(p.tracks)) {
-      playlists[id]={id,name:str(p.name).slice(0,200),tracks:p.tracks.filter((id)=>typeof id==="string" && tracks[id])};
+      playlists[id]={id,name:str(p.name).slice(0,200),tracks:p.tracks.filter((id)=>typeof id==="string" && tracks[id]),
+        cover:Number.isSafeInteger(p.cover) ? p.cover : 0};
     }
   }
   return {tracks,playlists,favorites:input.favorites.filter((id)=>typeof id==="string" && tracks[id]),
@@ -820,6 +821,16 @@ async function route(request, env, ctx) {
   if (request.method==="GET" && path==="/google/callback") return googleCallback(url,env);
   if (request.method==="GET" && path.startsWith("/avatar/")) return avatar(path.slice(8),env);
   if (request.method==="GET" && path.startsWith("/banner/")) return avatar(path.slice(8),env,"banners");
+  const coverPath = path.match(/^\/playlist-cover\/([0-9a-f-]{36})\/([0-9a-zA-Z_-]{8,64})$/);
+  if (request.method==="GET" && coverPath) {
+    const row = await env.DB.prepare("SELECT content_type,data FROM playlist_covers WHERE user_id=? AND playlist_id=?").bind(coverPath[1],coverPath[2]).first();
+    if (!row) throw new HttpError(404, "Not found.");
+    return new Response(new Uint8Array(row.data), { headers: {
+      "content-type": row.content_type, "cache-control": "public, max-age=31536000, immutable",
+      "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'",
+      "cross-origin-resource-policy": "cross-origin",
+    }});
+  }
   if (request.method==="GET" && path==="/link/callback") return linkCallback(url,env);
   const {user,hash} = await authenticate(request,env);
   const social = await socialRoute(request,env,user,path,url);
@@ -946,6 +957,25 @@ async function route(request, env, ctx) {
       throw new HttpError(503,"Could not send the email right now. Try again in a moment.");
     }
     return reply({account:publicUser(updated,env.PUBLIC_BASE)});
+  }
+  const cover = path.match(/^\/playlists\/([0-9a-zA-Z_-]{8,64})\/cover$/);
+  if (cover && request.method==="PUT") {
+    await rate(env, request, "cover", 60, user.id);
+    const type = (request.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    const data = await bytes(request, 250_000);
+    if (!data.length || !imageMatches(type, data)) throw new HttpError(400,"Use a JPEG, PNG or WebP image under 250 KB.");
+    const have = await env.DB.prepare("SELECT COUNT(*) AS n, MAX(CASE WHEN playlist_id=?2 THEN version END) AS v FROM playlist_covers WHERE user_id=?1").bind(user.id,cover[1]).first();
+    if (have.v === null && have.n >= 100) throw new HttpError(409,"You can have pictures on up to 100 playlists.");
+    // The version only grows, so every device can tell which picture is newer.
+    const version = Math.max((have.v || 0) + 1, now());
+    await env.DB.prepare("INSERT INTO playlist_covers(user_id,playlist_id,content_type,data,version) VALUES (?,?,?,?,?) ON CONFLICT(user_id,playlist_id) DO UPDATE SET content_type=excluded.content_type,data=excluded.data,version=excluded.version")
+      .bind(user.id,cover[1],type,data.buffer,version).run();
+    return reply({version});
+  }
+  if (cover && request.method==="DELETE") {
+    await env.DB.prepare("DELETE FROM playlist_covers WHERE user_id=? AND playlist_id=?").bind(user.id,cover[1]).run();
+    // A negative version means "taken away at this time": other devices see it is newer than the picture they have.
+    return reply({version:-now()});
   }
   if (path==="/me/avatar" && request.method==="PUT") {
     await rate(env, request, "avatar", 20, user.id);

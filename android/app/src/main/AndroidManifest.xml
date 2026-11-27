@@ -41,6 +41,37 @@
 
         <receiver android:name=".NoteActions" android:exported="false" />
 
+        <!-- Home-screen widgets: a wide "now playing" card and a small square cover. -->
+        <receiver android:name=".NowPlayingWidget" android:exported="false" android:label="Roy Music · Now playing">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_now_playing_info" />
+        </receiver>
+        <receiver android:name=".LibraryWidget" android:exported="false" android:label="Roy Music · Library">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_library_info" />
+        </receiver>
+        <receiver android:name=".ListWidget" android:exported="false" android:label="Roy Music · Playlist">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_list_info" />
+        </receiver>
+        <activity android:name=".WidgetPickActivity" android:exported="true" android:theme="@style/App">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE" />
+            </intent-filter>
+        </activity>
+        <receiver android:name=".CoverWidget" android:exported="false" android:label="Roy Music · Cover">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_cover_info" />
+        </receiver>
+
         <!-- The music lives here, not in the screen: closing the app does not stop it. -->
         <service
             android:name=".PlaybackService"

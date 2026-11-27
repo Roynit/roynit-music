@@ -31,6 +31,10 @@ pub struct Playlist {
     pub id: String,
     pub name: String,
     pub tracks: Vec<String>,
+    /// Version of the picture chosen for this playlist (kept on the account, so every device shows it): above zero there
+    /// is a picture, below zero it was taken away, zero means none was ever chosen.
+    #[serde(default)]
+    pub cover: i64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -252,7 +256,7 @@ mod order_tests {
         for (id, name) in names {
             library.playlists.insert(
                 (*id).into(),
-                Playlist { id: (*id).into(), name: (*name).into(), tracks: vec![] },
+                Playlist { id: (*id).into(), name: (*name).into(), tracks: vec![], cover: 0 },
             );
         }
         library.playlist_order = order.iter().map(|id| (*id).to_owned()).collect();

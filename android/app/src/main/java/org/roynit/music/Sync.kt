@@ -221,7 +221,7 @@ object Sync {
             val ids = JSONArray()
             p.songs.filter(::syncable).forEach { ids.put(add(it)) }
             foreign(oldLists?.optJSONObject(p.id)?.optJSONArray("tracks")).forEach { ids.put(it) }
-            playlists.put(p.id, JSONObject().put("id", p.id).put("name", p.name).put("tracks", ids))
+            playlists.put(p.id, JSONObject().put("id", p.id).put("name", p.name).put("tracks", ids).put("cover", p.cover))
         }
 
         val history = JSONArray()

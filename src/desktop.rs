@@ -4432,6 +4432,8 @@ impl App {
             name: String,
             count: usize,
             cover: Option<String>,
+            /// Whether the cover is a picture the person chose (it can be taken away).
+            custom: bool,
             ghost: Option<Instant>,
         }
         let filtering = !self.sidebar_query.trim().is_empty();
@@ -4452,11 +4454,13 @@ impl App {
                 key: p.id.clone(),
                 name: p.name.clone(),
                 count: p.tracks.len(),
-                cover: p
-                    .tracks
-                    .iter()
-                    .filter_map(|id| self.library.tracks.get(id))
-                    .find_map(|t| t.cover.clone()),
+                cover: self.roy_account.playlist_cover_uri(&p.id, p.cover).or_else(|| {
+                    p.tracks
+                        .iter()
+                        .filter_map(|id| self.library.tracks.get(id))
+                        .find_map(|t| t.cover.clone())
+                }),
+                custom: p.cover > 0,
                 ghost: None,
             })
             .collect();
@@ -4466,7 +4470,7 @@ impl App {
                 if let reorder_ui::Snapshot::Playlist { name, count, cover } = &ghost.snapshot {
                     rows.insert(
                         ghost.index.min(rows.len()),
-                        Row { key: ghost.key.clone(), name: name.clone(), count: *count, cover: cover.clone(), ghost: Some(ghost.at) },
+                        Row { key: ghost.key.clone(), name: name.clone(), count: *count, cover: cover.clone(), custom: false, ghost: Some(ghost.at) },
                     );
                 }
             }
@@ -4485,6 +4489,7 @@ impl App {
             self.motion(),
         );
         let (mut open, mut delete) = (None, None);
+        let (mut change_cover, mut remove_cover): (Option<String>, Option<String>) = (None, None);
         for i in list.order() {
             let row = &rows[i];
             let rect = list.rect(i);
@@ -4519,6 +4524,14 @@ impl App {
                     open = Some((row.key.clone(), row.name.clone()));
                     ui.close();
                 }
+                if ui.button("Change picture…").clicked() {
+                    change_cover = Some(row.key.clone());
+                    ui.close();
+                }
+                if row.custom && ui.button("Remove picture").clicked() {
+                    remove_cover = Some(row.key.clone());
+                    ui.close();
+                }
                 ui.separator();
                 if ui
                     .button(RichText::new("Delete playlist").color(Color32::from_rgb(255, 170, 178)))
@@ -4535,6 +4548,14 @@ impl App {
                     open = Some((row.key.clone(), row.name.clone()));
                     ui.close();
                 }
+                if ui.button("Change picture…").clicked() {
+                    change_cover = Some(row.key.clone());
+                    ui.close();
+                }
+                if row.custom && ui.button("Remove picture").clicked() {
+                    remove_cover = Some(row.key.clone());
+                    ui.close();
+                }
                 ui.separator();
                 if ui
                     .button(RichText::new("Delete playlist").color(Color32::from_rgb(255, 170, 178)))
@@ -4544,6 +4565,12 @@ impl App {
                     ui.close();
                 }
             });
+        }
+        if let Some(id) = change_cover {
+            self.roy_account.choose_playlist_cover(ui.ctx(), &id);
+        }
+        if let Some(id) = remove_cover {
+            self.roy_account.remove_playlist_cover(&id);
         }
         let reordered = list.finish();
         let keys: Vec<String> = rows.iter().map(|r| r.key.clone()).collect();
@@ -8010,6 +8037,9 @@ impl eframe::App for App {
                 }
                 roy_account_ui::Event::Reset => {
                     self.send("account-reset", "account.music.reset", json!({}))
+                }
+                roy_account_ui::Event::PlaylistCover { id, version } => {
+                    self.send("playlist", "playlist.cover", json!({"id":id,"cover":version}))
                 }
                 roy_account_ui::Event::Merge(snapshot) => self.send(
                     "account-merged",

@@ -67,6 +67,8 @@ pub enum Event {
     Merge(Value),
     /// A different account signed in on this device: set the old account's library aside first.
     Reset,
+    /// A playlist's picture was set (a version above zero) or taken away (a negative one): the library records it.
+    PlaylistCover { id: String, version: i64 },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -81,6 +83,8 @@ enum Action {
     AvatarRemove,
     Banner,
     BannerRemove,
+    PlaylistCover,
+    PlaylistCoverRemove,
     Username,
     CheckName,
     Password,
@@ -104,6 +108,8 @@ pub struct State {
     /// No syncing while the previous account's library is being put away.
     hold_sync: bool,
     cropper: Option<(super::crop_ui::Cropper, Action)>,
+    /// The playlist whose picture is being uploaded or removed.
+    cover_target: Option<String>,
     next_read: Instant,
     client: Client,
     endpoint: String,
@@ -203,6 +209,7 @@ impl State {
             new_owner: None,
             hold_sync: false,
             cropper: None,
+            cover_target: None,
             next_read: Instant::now(),
             automatic: true,
             client: Client::builder()
@@ -435,6 +442,8 @@ impl State {
             Action::Reset => (reqwest::Method::POST, "/password/reset".to_owned(), false),
             Action::Banner => (reqwest::Method::PUT, "/me/banner".to_owned(), true),
             Action::BannerRemove => (reqwest::Method::DELETE, "/me/banner".to_owned(), true),
+            Action::PlaylistCover => (reqwest::Method::PUT, format!("/playlists/{}/cover", self.cover_target.clone().unwrap_or_default()), true),
+            Action::PlaylistCoverRemove => (reqwest::Method::DELETE, format!("/playlists/{}/cover", self.cover_target.clone().unwrap_or_default()), true),
             Action::SignOut => (reqwest::Method::POST, "/logout".to_owned(), true),
             Action::ReadMusic => (reqwest::Method::GET, "/music".to_owned(), true),
             Action::WriteMusic => (reqwest::Method::PUT, "/music".to_owned(), true),
@@ -549,6 +558,37 @@ impl State {
         Some(format!("{}/banner/{}?v={version}", self.endpoint, self.profile["id"].as_str()?))
     }
 
+    /// Where a playlist's own picture is served from; the version in the address changes with every upload.
+    pub(super) fn playlist_cover_uri(&self, id: &str, version: i64) -> Option<String> {
+        if version <= 0 || self.profile.is_null() {
+            return None;
+        }
+        Some(format!("{}/playlist-cover/{}/{id}?v={version}", self.endpoint, self.profile["id"].as_str()?))
+    }
+
+    /// Pick a picture for a playlist, crop it square, and keep it on the account.
+    pub(super) fn choose_playlist_cover(&mut self, ctx: &egui::Context, id: &str) {
+        if self.profile.is_null() {
+            self.notice("Sign in with your Roy account to give a playlist its own picture.", true);
+            return;
+        }
+        let Some(path) = rfd::FileDialog::new().add_filter("Pictures", &["jpg", "jpeg", "png", "webp"]).pick_file() else {
+            return;
+        };
+        match super::crop_ui::Cropper::new(ctx, &path, false, (512, 512), "Crop the playlist picture") {
+            Ok(cropper) => {
+                self.cover_target = Some(id.to_owned());
+                self.cropper = Some((cropper, Action::PlaylistCover));
+            }
+            Err(error) => self.notice(error, true),
+        }
+    }
+
+    pub(super) fn remove_playlist_cover(&mut self, id: &str) {
+        self.cover_target = Some(id.to_owned());
+        self.request(Action::PlaylistCoverRemove, Value::Null);
+    }
+
     fn choose_banner(&mut self, ctx: &egui::Context) {
         self.choose(ctx, false);
     }
@@ -587,10 +627,10 @@ impl State {
             super::crop_ui::Outcome::Cancel => self.cropper = None,
             super::crop_ui::Outcome::Done(picture) => {
                 self.cropper = None;
-                let bytes = if action == Action::Avatar {
-                    encode_avatar(&picture)
-                } else {
-                    encode_banner(&picture)
+                let bytes = match action {
+                    Action::Avatar => encode_avatar(&picture),
+                    Action::PlaylistCover => encode_cover(&picture),
+                    _ => encode_banner(&picture),
                 };
                 match bytes {
                     Ok(bytes) => self.request_with(action, Value::Null, Some(bytes)),
@@ -653,6 +693,12 @@ impl State {
                                 } else {
                                     self.notice("Could not open Google sign-in.", true);
                                 }
+                            }
+                            Action::PlaylistCover | Action::PlaylistCoverRemove => {
+                                if let Some(id) = self.cover_target.take() {
+                                    self.events.push(Event::PlaylistCover { id, version: data["version"].as_i64().unwrap_or(0) });
+                                }
+                                self.notice(if action == Action::PlaylistCover { "Playlist picture updated." } else { "Playlist picture removed." }, false);
                             }
                             Action::Save
                             | Action::Avatar
@@ -1015,6 +1061,20 @@ fn encode_avatar(square: &image::RgbImage) -> Result<Vec<u8>, String> {
         .encode_image(square)
         .map_err(|_| "Could not prepare that picture.".to_owned())?;
     Ok(out)
+}
+
+/// A cropped square picture for a playlist, saved as a JPEG that fits the server's limit.
+fn encode_cover(square: &image::RgbImage) -> Result<Vec<u8>, String> {
+    for quality in [88, 76, 62, 48] {
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality)
+            .encode_image(square)
+            .map_err(|_| "Could not prepare that picture.".to_owned())?;
+        if out.len() <= 240_000 {
+            return Ok(out);
+        }
+    }
+    Err("That picture is too detailed. Try a simpler one.".into())
 }
 
 /// A cropped cover strip, saved as a JPEG that fits the server's limit.

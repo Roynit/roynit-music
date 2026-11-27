@@ -1,3 +1,7 @@
+# Roy Music 0.3.7
+
+- Give a playlist its own picture: right-click it in the sidebar and choose Change picture. It is kept on your account, so your phone shows it too.
+
 # Roy Music 0.3.6
 
 - The mini player has a clear "Full player" button to go back to the full window, and Esc does the same.
