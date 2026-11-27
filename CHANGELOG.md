@@ -1,3 +1,7 @@
+# Roy Music 0.3.10
+
+- The song menu's "Remove from library" is now "Delete from everywhere", so it is not mistaken for removing a song from one playlist.
+
 # Roy Music 0.3.9
 
 - A notification tells you when a new version is out, and the app looks for one every half hour instead of only at launch.

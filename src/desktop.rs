@@ -2535,7 +2535,7 @@ impl App {
                 }
                 ui.close();
             }
-            if ui.button("Remove from library").clicked() {
+            if ui.button("Delete from everywhere").clicked() {
                 self.send("remove", "library.remove", json!({"id":track.id}));
                 ui.close();
             }
