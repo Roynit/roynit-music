@@ -1,3 +1,8 @@
+# Roy Music 0.4.1
+
+- Importing a YouTube link now takes the playlist itself, even from a link opened on one of its songs. A Mix or radio imports only its first 50 songs instead of hundreds.
+- Paste any playlist link in Import music: the service is recognised from the link and the import starts at once.
+
 # Roy Music 0.4.0
 
 - Voice messages: record from the microphone (mic button beside the message box) and play them in the app with a waveform.

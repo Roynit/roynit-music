@@ -59,6 +59,7 @@ impl Providers {
             (1..=10000).contains(&limit),
             "Collection limit must be 1..10000"
         );
+        let (url, limit) = collection_target(url, limit);
         let mut a = self.args();
         a.extend([
             "--flat-playlist".into(),
@@ -66,7 +67,7 @@ impl Providers {
             "--playlist-end".into(),
             limit.to_string(),
             "--".into(),
-            url.into(),
+            url,
         ]);
         let value = tools::json("yt-dlp", &a)?;
         let tracks: Vec<_> = entries(&value).into_iter().filter_map(map_track).collect();
@@ -337,6 +338,29 @@ impl Providers {
         Ok(target)
     }
 }
+/// What yt-dlp should read for a YouTube link to a playlist. A song opened from a playlist (`watch?v=…&list=PL…`)
+/// becomes the playlist itself. A Mix or radio (`list=RD…`) never ends, so only its first 50 songs are taken.
+pub fn collection_target(url: &str, limit: usize) -> (String, usize) {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return (url.into(), limit);
+    };
+    let host = parsed.host_str().unwrap_or_default().to_lowercase();
+    if !(host == "youtube.com" || host.ends_with(".youtube.com") || host == "youtu.be") {
+        return (url.into(), limit);
+    }
+    let Some(list) = parsed.query_pairs().find(|(k, _)| k == "list").map(|(_, v)| v.into_owned()) else {
+        return (url.into(), limit);
+    };
+    // A radio started from a playlist names that playlist after RDAMPL: import the playlist, not the radio.
+    let list = list.strip_prefix("RDAMPL").map(str::to_owned).unwrap_or(list);
+    // RDCLAK… lists are albums and editorial playlists; every other RD… list is a mix that runs to hundreds of songs.
+    if list.starts_with("RD") && !list.starts_with("RDCLAK") {
+        return (url.into(), limit.min(50));
+    }
+    let site = if host.starts_with("music.") { "https://music.youtube.com" } else { "https://www.youtube.com" };
+    (format!("{site}/playlist?list={list}"), limit)
+}
+
 pub fn validate_url(input: &str) -> Result<()> {
     let url = url::Url::parse(input)?;
     ensure!(

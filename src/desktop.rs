@@ -7686,30 +7686,14 @@ impl App {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.import_url)
                                 .id(egui::Id::new("playlist-import-url"))
-                                .hint_text("Playlist link (YouTube, Spotify, SoundCloud, Deezer)")
+                                .hint_text("Paste any playlist link")
                                 .desired_width(260.),
                         );
                         if ui.button("Import").clicked() && !self.import_url.trim().is_empty() {
-                            let host = url::Url::parse(&self.import_url)
-                                .ok()
-                                .and_then(|u| u.host_str().map(str::to_string))
-                                .unwrap_or_default();
-                            let operation = if self.import_url.starts_with("spotify:playlist:")
-                                || host.contains("spotify.com")
-                                || host.contains("deezer.com")
-                                || host.contains("apple.com")
-                                || host.contains("yandex.")
-                                || host == "vk.com"
-                                || host.ends_with(".vk.com")
-                                || host == "vk.ru"
-                                || host.ends_with(".tiktok.com")
-                                || host == "tiktok.com"
-                            {
-                                "catalog.import"
-                            } else {
-                                "collection.import"
-                            };
-                            self.job("import", operation, json!({"url":self.import_url}));
+                            let url = self.import_url.clone();
+                            if let Err(error) = self.import_link(&url) {
+                                self.status = error;
+                            }
                         }
                     });
                 }

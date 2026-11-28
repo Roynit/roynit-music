@@ -90,9 +90,66 @@ fn belongs_to(source: &Source, url: &str) -> bool {
     })
 }
 
+/// A pasted link, tidied: spaces trimmed and "https://" added when it was left off.
+fn clean(url: &str) -> String {
+    let url = url.trim();
+    if url.starts_with("spotify:") || url.contains("://") { url.to_owned() } else { format!("https://{url}") }
+}
+
+/// Which service a link comes from.
+fn detect(url: &str) -> Option<usize> {
+    SOURCES.iter().position(|source| belongs_to(source, url))
+}
+
+/// Whether the person just pasted into this field.
+fn pasted(ui: &egui::Ui, field: &egui::Response) -> bool {
+    field.has_focus() && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))))
+}
+
 impl App {
-    /// Settings → Import music: one row per service; Import opens the link dialog.
+    /// Starts importing a link from whichever service it belongs to.
+    pub(super) fn import_link(&mut self, url: &str) -> Result<(), String> {
+        self.import_to_favorites = false;
+        self.start_import(url)
+    }
+
+    fn start_import(&mut self, url: &str) -> Result<(), String> {
+        let url = clean(url);
+        let source = detect(&url).ok_or_else(|| "That link is not from Spotify, YouTube, SoundCloud, Apple Music, Deezer, Yandex Music, TikTok or VK.".to_owned())?;
+        self.import_pending_fav = self.import_to_favorites;
+        self.job("import", operation(&url), json!({"url":url}));
+        self.status = format!("Importing from {}…", SOURCES[source].name);
+        self.import_error = None;
+        self.import_url.clear();
+        Ok(())
+    }
+
+    /// Settings → Import music: paste any link at the top (the service is found from the link), or pick a service.
     pub(super) fn settings_import(&mut self, ui: &mut egui::Ui, q: &str) {
+        if q.is_empty() {
+            ui.label(RichText::new("Paste a playlist link from any service: it is recognised and imported at once.").color(MUTED));
+            ui.add_space(6.);
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut self.import_url)
+                    .id(egui::Id::new("import-any-link"))
+                    .hint_text("Paste a link: YouTube, Spotify, SoundCloud, Apple Music, Deezer…")
+                    .desired_width(ui.available_width())
+                    .margin(egui::vec2(12., 10.)),
+            );
+            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (enter || pasted(ui, &field)) && !self.import_url.trim().is_empty() {
+                let url = self.import_url.clone();
+                if let Err(error) = self.start_import(&url) {
+                    self.import_error = Some(error);
+                }
+            }
+            if self.import_source.is_none()
+                && let Some(error) = &self.import_error
+            {
+                ui.label(RichText::new(error).color(Color32::from_rgb(244, 155, 158)));
+            }
+            ui.add_space(10.);
+        }
         for (index, source) in SOURCES.iter().enumerate() {
             Self::row(
                 ui,
@@ -159,12 +216,20 @@ impl App {
                 self.import_account_tab(ui);
                 return;
             }
-            ui.add(
+            let field = ui.add(
                 egui::TextEdit::singleline(&mut self.import_url)
                     .hint_text(format!("Paste a {} link", source.name))
                     .desired_width(ui.available_width())
                     .margin(egui::vec2(12., 10.)),
             );
+            // A link from another service is fine: the dialog follows it.
+            if let Some(found) = detect(&clean(&self.import_url)) {
+                self.import_source = Some(found);
+            }
+            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (enter || (pasted(ui, &field) && detect(&clean(&self.import_url)).is_some())) && !self.import_url.trim().is_empty() {
+                start = true;
+            }
             ui.add_space(12.);
             ui.label(RichText::new("Import into").bold());
             egui::ComboBox::from_id_salt("import-into")
@@ -212,17 +277,14 @@ impl App {
             });
         });
         if start {
-            let url = self.import_url.trim().to_owned();
-            if belongs_to(source, &url) {
-                self.import_pending_fav = self.import_to_favorites;
-                self.job("import", operation(&url), json!({"url":url}));
-                self.status = format!("Importing from {}…", source.name);
-                self.import_error = None;
-                self.import_return = false;
-                started = true;
-                close = true;
-            } else {
-                self.import_error = Some(format!("That is not a {} link.", source.name));
+            let url = self.import_url.clone();
+            match self.start_import(&url) {
+                Ok(()) => {
+                    self.import_return = false;
+                    started = true;
+                    close = true;
+                }
+                Err(error) => self.import_error = Some(error),
             }
         }
         if close {

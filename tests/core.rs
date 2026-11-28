@@ -262,3 +262,17 @@ fn account_merge_keeps_deletions_from_coming_back() {
     assert!(library.favorites.is_empty());
     assert!(library.playlists["p"].tracks.is_empty());
 }
+
+#[test]
+fn youtube_import_reads_the_playlist_not_a_mix() {
+    use riff_core::provider::collection_target;
+    let (url, limit) = collection_target("https://www.youtube.com/watch?v=abc&list=PLx123&index=3&si=z", 1000);
+    assert_eq!((url.as_str(), limit), ("https://www.youtube.com/playlist?list=PLx123", 1000));
+    let (url, _) = collection_target("https://music.youtube.com/playlist?list=OLAK5uy_q&si=z", 1000);
+    assert_eq!(url, "https://music.youtube.com/playlist?list=OLAK5uy_q");
+    let (url, limit) = collection_target("https://music.youtube.com/watch?v=abc&list=RDAMVMabc", 1000);
+    assert_eq!((url.as_str(), limit), ("https://music.youtube.com/watch?v=abc&list=RDAMVMabc", 50));
+    assert_eq!(collection_target("https://music.youtube.com/playlist?list=RDCLAK5uy_x", 1000).1, 1000);
+    assert_eq!(collection_target("https://music.youtube.com/watch?v=a&list=RDAMPLPLx123", 1000).0, "https://music.youtube.com/playlist?list=PLx123");
+    assert_eq!(collection_target("https://open.spotify.com/playlist/x", 1000).0, "https://open.spotify.com/playlist/x");
+}
